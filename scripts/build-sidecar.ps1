@@ -22,7 +22,7 @@ if (-not $Triple) {
 Write-Host "Building sidecar for target: $Triple"
 
 # Ensure output directory exists
-$DistPath = Join-Path $ProjectRoot "src-tauri" "binaries"
+$DistPath = Join-Path (Join-Path $ProjectRoot "src-tauri") "binaries"
 New-Item -ItemType Directory -Force -Path $DistPath | Out-Null
 
 # Build with PyInstaller
@@ -31,7 +31,7 @@ pyinstaller `
     --name ghostchat-server `
     --add-data "backend\static;backend\static" `
     --distpath $DistPath `
-    --workpath (Join-Path $ProjectRoot "build" "pyinstaller") `
+    --workpath (Join-Path (Join-Path $ProjectRoot "build") "pyinstaller") `
     --specpath (Join-Path $ProjectRoot "build") `
     --exclude-module numpy `
     --exclude-module PIL `

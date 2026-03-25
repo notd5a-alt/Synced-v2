@@ -88,8 +88,8 @@ jobs:
             --exclude-module rich `
             --exclude-module chardet `
             backend\sidecar_entry.py
-          $exe = Join-Path "src-tauri" "binaries" "ghostchat-server.exe"
-          $target = Join-Path "src-tauri" "binaries" "ghostchat-server-$triple.exe"
+          $exe = Join-Path (Join-Path "src-tauri" "binaries") "ghostchat-server.exe"
+          $target = Join-Path (Join-Path "src-tauri" "binaries") "ghostchat-server-$triple.exe"
           Move-Item -Force $exe $target
           Write-Host "Sidecar built: $target"
         shell: pwsh
