@@ -37,9 +37,18 @@ interface ActiveSend {
   completed: boolean;
 }
 
+export interface SentFile {
+  id: string;
+  name: string;
+  size: number;
+  compressedSize: number;
+  timestamp: number;
+}
+
 export interface FileTransferHook {
   incoming: IncomingFile[];
   outgoing: OutgoingFile | null;
+  sentFiles: SentFile[];
   sendFile: (file: File) => Promise<void>;
   cancelTransfer: (id: string) => void;
 }
@@ -50,6 +59,7 @@ export default function useFileTransfer(
 ): FileTransferHook {
   const [incoming, setIncoming] = useState<IncomingFile[]>([]);
   const [outgoing, setOutgoing] = useState<OutgoingFile | null>(null);
+  const [sentFiles, setSentFiles] = useState<SentFile[]>([]);
   const pendingRef = useRef<Record<string, PendingFile>>({});
   const sendLockRef = useRef(false);
   const channelRef = useRef(channel);
@@ -278,7 +288,15 @@ export default function useFileTransfer(
               if (send.completed) {
                 activeSendRef.current = null;
                 sendLockRef.current = false;
+                setSentFiles((prev) => [...prev, {
+                  id: send.id,
+                  name: send.name,
+                  size: send.originalSize,
+                  compressedSize: send.compressedSize,
+                  timestamp: Date.now(),
+                }]);
                 setOutgoing(null);
+                playFileComplete();
                 sendResolveRef.current?.();
                 sendResolveRef.current = null;
               }
@@ -452,7 +470,15 @@ export default function useFileTransfer(
       if (send.completed) {
         activeSendRef.current = null;
         sendLockRef.current = false;
+        setSentFiles((prev) => [...prev, {
+          id: send.id,
+          name: send.name,
+          size: send.originalSize,
+          compressedSize: send.compressedSize,
+          timestamp: Date.now(),
+        }]);
         setOutgoing(null);
+        playFileComplete();
       } else {
         // Paused — wait for resume to complete
         await new Promise<void>((resolve) => {
@@ -504,5 +530,5 @@ export default function useFileTransfer(
     }
   }, []);
 
-  return { incoming, outgoing, sendFile, cancelTransfer };
+  return { incoming, outgoing, sentFiles, sendFile, cancelTransfer };
 }

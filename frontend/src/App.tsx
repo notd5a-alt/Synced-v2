@@ -490,6 +490,7 @@ export default function App() {
           <FileShare
             incoming={files.incoming}
             outgoing={files.outgoing}
+            sentFiles={files.sentFiles}
             onSendFile={files.sendFile}
             onCancel={files.cancelTransfer}
           />

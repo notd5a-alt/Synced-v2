@@ -861,6 +861,16 @@ input[type="text"]:focus:placeholder-shown {
 .ascii-progress.paused { color: #f0a030; }
 .transfer-info { font-size: 0.75rem; color: var(--text-dim); white-space: nowrap; }
 .transfer a.btn { text-decoration: none; }
+.transfer-sent { border-left: 3px solid var(--accent); }
+.transfer-direction {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+}
 .transfer-failed { border-left: 3px solid #f55; }
 .transfer-error { font-size: 0.75rem; color: #f55; }
 .compression-badge {

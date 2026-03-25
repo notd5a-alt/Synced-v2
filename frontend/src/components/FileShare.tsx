@@ -1,5 +1,6 @@
 import { useRef, type ChangeEvent, type DragEvent } from "react";
 import type { IncomingFile, OutgoingFile } from "../types";
+import type { SentFile } from "../hooks/useFileTransfer";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -24,11 +25,12 @@ function asciiProgressBar(progress: number, width = 20, paused = false): string 
 interface FileShareProps {
   incoming: IncomingFile[];
   outgoing: OutgoingFile | null;
+  sentFiles: SentFile[];
   onSendFile: (file: File) => Promise<void>;
   onCancel?: (id: string) => void;
 }
 
-export default function FileShare({ incoming, outgoing, onSendFile, onCancel }: FileShareProps) {
+export default function FileShare({ incoming, outgoing, sentFiles, onSendFile, onCancel }: FileShareProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (e: ChangeEvent<HTMLInputElement>) => {
@@ -103,6 +105,7 @@ export default function FileShare({ incoming, outgoing, onSendFile, onCancel }: 
         <div key={f.id} className={`transfer ${f.status === "failed" ? "transfer-failed" : ""}`}>
           <div className="transfer-header">
             <span className="transfer-name">{f.name}</span>
+            <span className="transfer-direction">received</span>
             {onCancel && (f.status === "receiving" || f.status === "paused") && (
               <button className="btn small danger" onClick={() => onCancel(f.id)}>
                 [ X ]
@@ -128,6 +131,23 @@ export default function FileShare({ incoming, outgoing, onSendFile, onCancel }: 
               {f.status === "paused" && " PAUSED - reconnecting..."}
             </span>
           )}
+        </div>
+      ))}
+
+      {sentFiles.map((f) => (
+        <div key={f.id} className="transfer transfer-sent">
+          <div className="transfer-header">
+            <span className="transfer-name">{f.name}</span>
+            <span className="transfer-direction">sent</span>
+          </div>
+          <span className="transfer-info">
+            {formatSize(f.size)}
+            {f.compressedSize < f.size && (
+              <span className="compression-badge">
+                {" "}({compressionRatio(f.size, f.compressedSize)})
+              </span>
+            )}
+          </span>
         </div>
       ))}
     </div>

@@ -6,6 +6,7 @@ import type { IncomingFile, OutgoingFile } from '../types';
 const defaultProps = {
   incoming: [] as IncomingFile[],
   outgoing: null as OutgoingFile | null,
+  sentFiles: [],
   onSendFile: vi.fn(),
   onCancel: vi.fn(),
 };
