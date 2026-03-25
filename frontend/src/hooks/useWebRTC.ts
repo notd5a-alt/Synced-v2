@@ -48,6 +48,8 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   signalingRef.current = signaling;
 
   const screenStreamRef = useRef<MediaStream | null>(null);
+  // Guard flag — set during cleanup to signal pending async ops to bail out
+  const cleaningUpRef = useRef(false);
 
   const [connectionState, setConnectionState] = useState("new");
   const [reinitCounter, setReinitCounter] = useState(0);
@@ -80,9 +82,16 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   }, []);
 
   const cleanup = useCallback(() => {
+    // Signal all pending async operations (shareScreen, toggleVideo, etc.) to bail out
+    cleaningUpRef.current = true;
+
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    // Clear screen track onended handlers to prevent stale closure leaks (C8)
+    screenStreamRef.current?.getTracks().forEach((t) => {
+      t.onended = null;
+      t.stop();
+    });
     screenStreamRef.current = null;
     screenAudioSenderRef.current = null;
     screenVideoSenderRef.current = null;
@@ -104,6 +113,12 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           r.track.onunmute = null;
         }
       });
+      // Null out PC event handlers to prevent stale closure callbacks (H3)
+      pc.onicecandidate = null;
+      pc.onconnectionstatechange = null;
+      pc.ontrack = null;
+      pc.onnegotiationneeded = null;
+      pc.ondatachannel = null;
       pc.close();
     }
     pcRef.current = null;
@@ -126,6 +141,9 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     // Bump counter so the init effect in App.tsx re-fires even when
     // connectionState was already "new" (no answer received yet)
     setReinitCounter((c) => c + 1);
+
+    // Reset cleanup flag so next init() cycle works normally
+    cleaningUpRef.current = false;
   }, []);
 
   const init = useCallback((iceConfig: RTCConfiguration | null) => {
@@ -161,10 +179,18 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       setConnectionState(pc.connectionState);
       if (pc.connectionState === "connected" && !hmacDerivedRef.current
           && pc.localDescription && pc.remoteDescription) {
-        hmacDerivedRef.current = true;
+        // Set flag AFTER promise resolves, not before — if derivation fails,
+        // we can retry on the next connectionstatechange (H1)
+        hmacDerivedRef.current = true; // guard against concurrent calls
         deriveHmacKey(pc.localDescription.sdp, pc.remoteDescription.sdp)
-          .then((key) => { if (key) setHmacKey(key); })
-          .catch(() => {});
+          .then((key) => {
+            if (key) {
+              setHmacKey(key);
+            } else {
+              hmacDerivedRef.current = false; // allow retry
+            }
+          })
+          .catch(() => { hmacDerivedRef.current = false; });
       }
     };
 
@@ -277,8 +303,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
     };
 
+    // Register signaling handler — uses a closure over the current PC instance.
+    // The handler checks pcRef identity to bail if PC was replaced (C2).
     sig.onMessage(async (msg: SignalingMessage) => {
-      const pc = pcRef.current;
+      // Bail if PC was replaced or cleaned up since handler was registered
+      if (pcRef.current !== pc) { log(`RTC msg ${msg.type} ignored (stale pc)`); return; }
       if (!pc) { log(`RTC msg ${msg.type} ignored (no pc)`); return; }
       const host = isHostRef.current;
 
@@ -392,7 +421,25 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   const endCall = useCallback(() => {
     const pc = pcRef.current;
     if (!pc) return;
-    // Stop all media senders
+    // Stop screen share tracks and clear onended handlers (H5)
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((t) => {
+        t.onended = null;
+        t.stop();
+      });
+      screenStreamRef.current = null;
+    }
+    // Remove screen senders explicitly to prevent dangling bandwidth usage
+    if (screenVideoSenderRef.current) {
+      try { pc.removeTrack(screenVideoSenderRef.current); } catch { /* already removed */ }
+      screenVideoSenderRef.current = null;
+    }
+    if (screenAudioSenderRef.current) {
+      try { pc.removeTrack(screenAudioSenderRef.current); } catch { /* already removed */ }
+      screenAudioSenderRef.current = null;
+    }
+    sharingInProgressRef.current = false;
+    // Stop all remaining media senders (mic, camera)
     pc.getSenders().forEach((s) => {
       if (s.track) {
         s.track.stop();
@@ -401,11 +448,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     });
     localStreamRef.current = null;
     setLocalStream(null);
-    screenStreamRef.current = null;
     setScreenStream(null);
-    screenAudioSenderRef.current = null;
-    screenVideoSenderRef.current = null;
-    sharingInProgressRef.current = false;
   }, []);
 
   const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
@@ -418,7 +461,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     if (!pc || !screenStreamRef.current) return;
 
     sharingInProgressRef.current = false;
-    screenStreamRef.current.getTracks().forEach((t) => t.stop());
+    // Clear onended handlers before stopping tracks to prevent double-fire (C8)
+    screenStreamRef.current.getTracks().forEach((t) => {
+      t.onended = null;
+      t.stop();
+    });
     screenStreamRef.current = null;
     setScreenStream(null);
 
@@ -457,8 +504,8 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         audio: true, // request system audio (Chrome shows a checkbox)
       });
 
-      // If stopScreenShare was called while awaiting getDisplayMedia, abort
-      if (!sharingInProgressRef.current) {
+      // Abort if stopScreenShare or cleanup was called while awaiting getDisplayMedia (C4/H4)
+      if (!sharingInProgressRef.current || cleaningUpRef.current || pcRef.current !== pc) {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
@@ -467,13 +514,12 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
 
       // Replace the camera video track with the screen track (no extra tracks)
       const screenTrack = stream.getVideoTracks()[0];
-      // Hint encoder to prioritize pixel-perfect sharpness for text/code (most common screen content)
-      if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
 
       // 1. Find sender with active video track (e.g., camera)
       let videoSender = pc.getSenders().find((s) => s.track?.kind === "video");
 
       // 2. Reuse saved sender from previous screen share (has null track)
+      // Verify sender still belongs to this PC instance (C3)
       if (!videoSender && screenVideoSenderRef.current) {
         if (pc.getSenders().includes(screenVideoSenderRef.current)) {
           videoSender = screenVideoSenderRef.current;
@@ -490,15 +536,19 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         screenVideoSenderRef.current = pc.addTrack(screenTrack, stream);
       }
 
+      // Hint encoder to prioritize pixel-perfect sharpness for text/code
+      // Set AFTER replaceTrack/addTrack so the transceiver is active
+      if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
+
       // Set initial screen share bitrate — bandwidth adaptation will adjust
-      // based on connection quality. Use 2.5Mbps (excellent tier) as starting
-      // point to avoid 4Mbps burst that causes packet loss on poor connections.
+      // to the correct tier within one poll cycle (~3s). Use conservative
+      // 1.5Mbps default to avoid burst-induced packet loss on poor connections.
       const screenSender = screenVideoSenderRef.current;
       if (screenSender) {
         try {
           const params = screenSender.getParameters();
           if (params.encodings?.length > 0) {
-            params.encodings[0].maxBitrate = 2_500_000;
+            params.encodings[0].maxBitrate = 1_500_000;
             params.encodings[0].maxFramerate = 30;
             await screenSender.setParameters(params);
           }
@@ -513,7 +563,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
-        screenAudioSenderRef.current = pc.addTrack(audioTrack, stream);
+        try {
+          screenAudioSenderRef.current = pc.addTrack(audioTrack, stream);
+        } catch (err) {
+          console.error("failed to add screen audio:", err);
+        }
       }
 
       // Register onended BEFORE state update to prevent race with browser's
@@ -549,11 +603,13 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
 
     const existingTrack = stream.getVideoTracks()[0];
     if (existingTrack) {
-      // Turn camera off — stop track and remove from connection
+      // Turn camera off — stop track and replace with null (no renegotiation)
       existingTrack.stop();
       stream.removeTrack(existingTrack);
       const sender = pc.getSenders().find((s) => s.track === existingTrack);
-      if (sender) pc.removeTrack(sender);
+      if (sender) {
+        try { await sender.replaceTrack(null); } catch { /* sender gone */ }
+      }
     } else {
       // Block turning camera on during screen share to prevent dual video senders
       if (screenStreamRef.current) {
@@ -565,9 +621,18 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         const videoStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
         });
+        if (cleaningUpRef.current) { videoStream.getTracks().forEach((t) => t.stop()); return; }
         const newTrack = videoStream.getVideoTracks()[0];
         stream.addTrack(newTrack);
-        pc.addTrack(newTrack, stream);
+        // Reuse existing video sender (with null track) to avoid creating a second transceiver (H2)
+        const existingSender = pc.getSenders().find(
+          (s) => s.track === null && s !== screenAudioSenderRef.current
+        ) || pc.getSenders().find((s) => s.track?.kind === "video");
+        if (existingSender) {
+          await existingSender.replaceTrack(newTrack);
+        } else {
+          pc.addTrack(newTrack, stream);
+        }
         // Set video codec preferences after adding video transceiver
         preferVideoCodecs(pc);
       } catch {
@@ -603,10 +668,12 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     if (!localStream) return;
     const handleDeviceChange = async () => {
       const pc = pcRef.current;
-      if (!pc) return;
+      if (!pc || cleaningUpRef.current) return;
       const currentTrack = localStreamRef.current?.getAudioTracks()[0];
       if (!currentTrack) return;
       const devices = await navigator.mediaDevices.enumerateDevices();
+      // Re-check after async — cleanup may have run during enumeration (M2)
+      if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) return;
       const audioDevices = devices.filter((d) => d.kind === "audioinput");
       const currentId = currentTrack.getSettings().deviceId;
       const stillExists = audioDevices.some((d) => d.deviceId === currentId);
@@ -621,14 +688,21 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
               autoGainControl: settings.autoGainControl ?? true,
             },
           });
+          // Re-check after getUserMedia — cleanup may have run (M2)
+          if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
+            newStream.getTracks().forEach((t) => t.stop());
+            return;
+          }
           const newTrack = newStream.getAudioTracks()[0];
           const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
           if (sender) {
             await sender.replaceTrack(newTrack);
             currentTrack.stop();
-            localStreamRef.current!.removeTrack(currentTrack);
-            localStreamRef.current!.addTrack(newTrack);
-            setLocalStream(new MediaStream(localStreamRef.current!.getTracks()));
+            localStreamRef.current.removeTrack(currentTrack);
+            localStreamRef.current.addTrack(newTrack);
+            setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+          } else {
+            newTrack.stop(); // no sender to attach to
           }
         } catch (err) {
           console.error("device switch failed:", err);

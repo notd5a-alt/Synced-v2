@@ -67,6 +67,7 @@ export default function useMicLevel(stream: MediaStream | null): number {
     return () => {
       clearInterval(interval);
       source.disconnect();
+      analyser.disconnect(); // H14: prevent orphaned node in audio graph
       ctx.close().catch(() => {});
       ctxRef.current = null;
     };

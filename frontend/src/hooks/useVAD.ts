@@ -82,6 +82,7 @@ export default function useVAD(
       clearInterval(interval);
       if (holdTimeout) clearTimeout(holdTimeout);
       source.disconnect();
+      analyser.disconnect(); // H14: prevent orphaned node in audio graph
       ctx.close().catch(() => {});
       localCtxRef.current = null;
     };
@@ -145,6 +146,7 @@ export default function useVAD(
       clearInterval(interval);
       if (holdTimeout) clearTimeout(holdTimeout);
       source.disconnect();
+      analyser.disconnect(); // H14: prevent orphaned node in audio graph
       ctx.close().catch(() => {});
       remoteCtxRef.current = null;
     };

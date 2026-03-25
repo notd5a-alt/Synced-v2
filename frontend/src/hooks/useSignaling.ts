@@ -125,10 +125,13 @@ export default function useSignaling(url: string | null): SignalingHook {
     if (ws && ws.readyState === WebSocket.OPEN) {
       addLog(`WS send: ${obj.type}`);
       ws.send(JSON.stringify(obj));
-    } else {
-      // Queue for retry on reconnect instead of dropping
+    } else if (reconnectAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
+      // Queue for retry on reconnect — but only if we're still trying (H9)
       sendQueueRef.current.push(obj);
       addLog(`WS send QUEUED (not open): ${obj.type}`);
+    } else {
+      // Max retries exhausted — drop message to prevent unbounded queue growth
+      addLog(`WS send DROPPED (closed): ${obj.type}`);
     }
   }, [addLog]);
 

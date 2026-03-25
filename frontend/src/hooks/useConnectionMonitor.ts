@@ -94,6 +94,11 @@ export default function useConnectionMonitor(
 
     restartAttemptsRef.current++;
     setIsRecovering(true);
+    // Clear connection timeout — ICE restart extends the connection lifecycle (H8)
+    if (timeoutTimerRef.current) {
+      clearTimeout(timeoutTimerRef.current);
+      timeoutTimerRef.current = null;
+    }
     try {
       pc.restartIce(); // triggers onnegotiationneeded → new offer with ice-restart
       // Start a timeout — if restart doesn't produce "connected" in time, try again
@@ -180,6 +185,7 @@ export default function useConnectionMonitor(
   }, [signalingState, isRecovering, attemptRestart]);
 
   // Quality monitoring via getStats()
+  const pollingRef = useRef(false); // guard against overlapping polls (C5)
   useEffect(() => {
     if (connectionState !== "connected") {
       if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
@@ -190,11 +196,16 @@ export default function useConnectionMonitor(
     const pollStats = async () => {
       const pc = pcRef.current;
       if (!pc) return;
+      // Skip if previous poll is still running (C5) — prevents hysteresis corruption
+      if (pollingRef.current) return;
+      pollingRef.current = true;
       try {
         const report = await pc.getStats();
         let rtt: number | null = null;
-        let totalPacketsLost = 0;
-        let totalPacketsReceived = 0;
+        // Track video packet loss separately — audio FEC makes audio loss tolerable,
+        // so only video loss should trigger quality downgrades (M4)
+        let videoPacketsLost = 0;
+        let videoPacketsReceived = 0;
         let totalBytesReceived = 0;
 
         let activePair: any = null;
@@ -212,11 +223,14 @@ export default function useConnectionMonitor(
           }
           if (stat.type === "inbound-rtp") {
             const rtpStat = stat as RTCInboundRtpStreamStats;
-            // Accumulate packets from both audio and video for loss calculation
-            totalPacketsLost += rtpStat.packetsLost || 0;
-            totalPacketsReceived += rtpStat.packetsReceived || 0;
             // Accumulate bytes from both audio and video for bitrate
             totalBytesReceived += rtpStat.bytesReceived || 0;
+            // Only track video packet loss for quality classification (M4)
+            // Audio FEC handles audio loss effectively, so it shouldn't downgrade quality
+            if (rtpStat.kind === "video") {
+              videoPacketsLost += rtpStat.packetsLost || 0;
+              videoPacketsReceived += rtpStat.packetsReceived || 0;
+            }
 
             if (rtpStat.kind === "video") {
               const videoStat = rtpStat as any;
@@ -249,13 +263,13 @@ export default function useConnectionMonitor(
           setConnectionType(isRelay ? "relay" : "direct");
         }
 
-        // Compute interval-based packet loss (not cumulative) for responsive quality signal
-        const intervalLost = totalPacketsLost - prevPacketsLostRef.current;
-        const intervalReceived = totalPacketsReceived - prevPacketsReceivedRef.current;
+        // Compute interval-based video packet loss (not cumulative) for responsive quality signal
+        const intervalLost = videoPacketsLost - prevPacketsLostRef.current;
+        const intervalReceived = videoPacketsReceived - prevPacketsReceivedRef.current;
         const intervalTotal = intervalReceived + intervalLost;
         const lossPercent = intervalTotal > 0 ? (intervalLost / intervalTotal) * 100 : 0;
-        prevPacketsLostRef.current = totalPacketsLost;
-        prevPacketsReceivedRef.current = totalPacketsReceived;
+        prevPacketsLostRef.current = videoPacketsLost;
+        prevPacketsReceivedRef.current = videoPacketsReceived;
 
         const now = performance.now();
         const instantBitrate = prevTimestampRef.current > 0
@@ -273,14 +287,36 @@ export default function useConnectionMonitor(
 
         setStats({ rtt, packetLoss: lossPercent, bitrate, codec, resolution, fps });
 
-        // Quality classification with hysteresis — require 2 consecutive samples
-        // at a new level before switching, to prevent oscillation at boundaries
+        // Quality classification with dead-zone hysteresis (M3)
+        // Uses asymmetric thresholds: tighter to upgrade, looser to downgrade.
+        // This prevents oscillation at boundaries (e.g., RTT 95↔105ms).
         if (rtt != null) {
+          const current = connectionQuality;
           let rawQuality: ConnectionQuality;
-          if (rtt < 100 && lossPercent < 0.5) rawQuality = "excellent";
-          else if (rtt < 250 && lossPercent < 2) rawQuality = "good";
-          else if (rtt < 500 && lossPercent < 5) rawQuality = "poor";
-          else rawQuality = "critical";
+
+          if (current === "good") {
+            // To upgrade to excellent: need RTT < 80 (not 100) — tighter
+            // To downgrade to poor: need RTT > 300 (not 250) — looser
+            if (rtt < 80 && lossPercent < 0.3) rawQuality = "excellent";
+            else if (rtt >= 300 || lossPercent >= 3) rawQuality = "poor";
+            else rawQuality = "good";
+          } else if (current === "excellent") {
+            // To downgrade to good: need RTT > 120 (not 100) — dead zone
+            if (rtt > 120 || lossPercent > 0.8) rawQuality = "good";
+            else rawQuality = "excellent";
+          } else if (current === "poor") {
+            // To upgrade to good: need RTT < 200
+            // To downgrade to critical: need RTT > 600
+            if (rtt < 200 && lossPercent < 1.5) rawQuality = "good";
+            else if (rtt >= 600 || lossPercent >= 7) rawQuality = "critical";
+            else rawQuality = "poor";
+          } else {
+            // current is "critical" or null — use standard thresholds
+            if (rtt < 100 && lossPercent < 0.5) rawQuality = "excellent";
+            else if (rtt < 250 && lossPercent < 2) rawQuality = "good";
+            else if (rtt < 500 && lossPercent < 5) rawQuality = "poor";
+            else rawQuality = "critical";
+          }
 
           if (rawQuality === candidateQualityRef.current) {
             qualityCountRef.current++;
@@ -290,14 +326,16 @@ export default function useConnectionMonitor(
           }
 
           // Apply immediately on first reading or after 2 consecutive samples
-          if (connectionQuality === null || qualityCountRef.current >= 2) {
-            if (rawQuality !== connectionQuality) {
+          if (current === null || qualityCountRef.current >= 2) {
+            if (rawQuality !== current) {
               setConnectionQuality(rawQuality);
             }
           }
         }
       } catch {
         // Stats not available
+      } finally {
+        pollingRef.current = false;
       }
     };
 
@@ -328,8 +366,10 @@ export default function useConnectionMonitor(
         const senders = pc.getSenders();
         for (const sender of senders) {
           if (sender.track?.kind !== "video") continue;
-          // Use higher bitrate tiers for screen share content (has contentHint set)
-          const isScreenShare = !!sender.track.contentHint;
+          // Use higher bitrate tiers for screen share content
+          // Detect via contentHint ("detail"/"text") or non-camera label (H7)
+          const hint = sender.track.contentHint;
+          const isScreenShare = hint === "detail" || hint === "text" || sender.track.label?.includes("screen");
           const tier = isScreenShare
             ? SCREEN_BANDWIDTH_TIERS[connectionQuality]
             : BANDWIDTH_TIERS[connectionQuality];
@@ -352,7 +392,7 @@ export default function useConnectionMonitor(
     };
 
     applyParams();
-  }, [connectionQuality, stats, pcRef]);
+  }, [connectionQuality, pcRef]); // H6: removed stats — only quality changes trigger adaptation
 
   // Cleanup on unmount
   useEffect(() => {

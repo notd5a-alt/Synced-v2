@@ -37,7 +37,7 @@ class _TokenBucket:
     def consume(self) -> bool:
         """Try to consume one token. Returns True if allowed, False if throttled."""
         now = time.monotonic()
-        elapsed = now - self._last
+        elapsed = max(0.0, now - self._last)  # clamp negative (defensive)
         self._last = now
         self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
         if self._tokens >= 1.0:
@@ -154,7 +154,8 @@ class SignalingRoom:
 
     async def relay(self, ws: WebSocket, data: str, msg_type: str):
         """Forward a validated message from one peer to the other."""
-        disconnect_peer = None
+        # Collect the target peer inside the lock, send OUTSIDE to prevent deadlock
+        # (send_text can block if the peer's buffer is full, holding the lock indefinitely)
         async with self._lock:
             other = None
             for peer in self._peers.values():
@@ -162,19 +163,19 @@ class SignalingRoom:
                     other = peer
                     break
 
-            if other:
-                try:
-                    logger.info("[%s] relaying %s message", self.room_id, msg_type)
-                    await other.send_text(data)
-                except WebSocketDisconnect:
-                    logger.warning("[%s] relay failed, peer disconnected", self.room_id)
-                    disconnect_peer = other
-                except Exception as e:
-                    logger.warning("[%s] relay send failed: %s", self.room_id, e)
-            else:
-                logger.warning("[%s] relay: no other peer to send to", self.room_id)
+        disconnect_peer = None
+        if other:
+            try:
+                logger.info("[%s] relaying %s message", self.room_id, msg_type)
+                await other.send_text(data)
+            except WebSocketDisconnect:
+                logger.warning("[%s] relay failed, peer disconnected", self.room_id)
+                disconnect_peer = other
+            except Exception as e:
+                logger.warning("[%s] relay send failed: %s", self.room_id, e)
+        else:
+            logger.warning("[%s] relay: no other peer to send to", self.room_id)
 
-        # Disconnect outside the lock (disconnect() acquires its own lock)
         if disconnect_peer:
             await self.disconnect(disconnect_peer)
 
@@ -278,18 +279,23 @@ class RoomManager:
             return self._rooms[room_id]
 
     async def remove_empty_rooms(self):
-        """Cleanup task to remove rooms with no peers."""
+        """Cleanup task to remove rooms with no peers.
+
+        Holds both manager lock AND room lock when deleting to prevent a race
+        where a peer (holding an existing room ref) calls connect() between
+        our empty check and the deletion.
+        """
         async with self._lock:
-            empty_rooms = []
-            for rid, r in self._rooms.items():
-                # Acquire room lock to prevent race with concurrent connect()
+            empty_rooms: list[str] = []
+            for rid, r in list(self._rooms.items()):
                 async with r._lock:
                     if not r._peers:
+                        # Delete while still holding room lock so no connect()
+                        # can sneak in between check and removal
                         empty_rooms.append(rid)
+                        del self._rooms[rid]
             if empty_rooms:
                 logger.info("Cleaning up %d empty rooms: %s", len(empty_rooms), empty_rooms)
-            for rid in empty_rooms:
-                del self._rooms[rid]
 
     async def cleanup_loop(self, interval: int = 60):
         """Infinite loop to periodically remove empty rooms."""

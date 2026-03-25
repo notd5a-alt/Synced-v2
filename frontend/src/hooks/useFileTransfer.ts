@@ -203,12 +203,28 @@ export default function useFileTransfer(
 
           if (msgType === "file-meta") {
             const id = parsed.id as string;
+            const size = parsed.size as number;
+            const compressedSize = (parsed.compressedSize as number) || size;
+
+            // Validate metadata sizes (H12)
+            if (typeof size !== "number" || size < 0 || size > MAX_FILE_SIZE ||
+                typeof compressedSize !== "number" || compressedSize < 0 || compressedSize > MAX_FILE_SIZE ||
+                typeof id !== "string" || !id) {
+              console.warn("Invalid file metadata, rejecting transfer");
+              return;
+            }
+
+            // Enforce sequential receives — reject if another file is actively receiving (C6)
+            if (activeReceiveIdRef.current && pendingRef.current[activeReceiveIdRef.current]?.status === "receiving") {
+              console.warn("Already receiving a file, rejecting concurrent transfer:", id);
+              return;
+            }
+
             activeReceiveIdRef.current = id;
-            const compressedSize = (parsed.compressedSize as number) || (parsed.size as number);
             const checksum = (parsed.checksum as string) || "";
             pendingRef.current[id] = {
               name: parsed.name as string,
-              size: parsed.size as number,
+              size,
               compressedSize,
               mimeType: parsed.mimeType as string,
               checksum,
@@ -284,9 +300,10 @@ export default function useFileTransfer(
 
             const resumeFromByte = parsed.receivedBytes as number;
             const resumeFromChunk = parsed.chunkIndex as number;
-            // Validate resume position is within bounds
+            const maxChunks = Math.ceil(send.compressedSize / CHUNK_SIZE);
+            // Validate resume position is within bounds (H13: chunkIndex upper bound)
             if (resumeFromByte < 0 || resumeFromByte > send.compressedSize ||
-                resumeFromChunk < 0) return;
+                resumeFromChunk < 0 || resumeFromChunk > maxChunks) return;
             send.byteOffset = resumeFromByte;
             send.chunkIndex = resumeFromChunk;
 
@@ -319,6 +336,14 @@ export default function useFileTransfer(
                 sendResolveRef.current?.();
                 sendResolveRef.current = null;
               }
+            }).catch((err) => {
+              // H10: prevent permanent send lock on resume failure
+              console.warn("Resume send failed:", err);
+              activeSendRef.current = null;
+              sendLockRef.current = false;
+              setOutgoing((prev) => prev ? { ...prev, status: "failed" as FileTransferStatus } : null);
+              sendResolveRef.current?.();
+              sendResolveRef.current = null;
             });
           } else if (msgType === "file-resume-ack") {
             // Server acknowledged our resume request — update status

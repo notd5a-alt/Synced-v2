@@ -79,7 +79,9 @@ export default function useDataChannel(
           }
         }
 
+        // Runtime validation — TypeScript types are erased, malformed peer messages can crash UI (H11)
         if (parsed.type === "text") {
+          if (typeof parsed.id !== "string" || typeof parsed.content !== "string") return;
           setMessages((prev) => [
             ...prev,
             { ...parsed, from: "peer", reactions: {} },
@@ -87,6 +89,7 @@ export default function useDataChannel(
           setPeerMsgSeq((s) => s + 1);
           playMessageReceived();
         } else if (parsed.type === "reaction") {
+          if (typeof parsed.msgId !== "string" || typeof parsed.emoji !== "string") return;
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== parsed.msgId) return m;
@@ -107,8 +110,10 @@ export default function useDataChannel(
             })
           );
         } else if (parsed.type === "read") {
+          if (typeof parsed.upTo !== "string") return;
           setPeerReadUpTo(parsed.upTo);
         } else if (parsed.type === "typing") {
+          if (typeof parsed.isTyping !== "boolean") return;
           setPeerTyping(parsed.isTyping);
           if (peerTypingTimeoutRef.current) clearTimeout(peerTypingTimeoutRef.current);
           if (parsed.isTyping) {
@@ -118,7 +123,9 @@ export default function useDataChannel(
             );
           }
         } else if (parsed.type === "presence") {
-          setPeerPresence(parsed.status);
+          const validStatuses = ["online", "idle", "away"];
+          if (typeof parsed.status !== "string" || !validStatuses.includes(parsed.status)) return;
+          setPeerPresence(parsed.status as PresenceStatus);
         }
       } catch { /* parse error */ }
     };
