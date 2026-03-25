@@ -1,15 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 from pathlib import Path
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 
-from backend.signaling import room
+from backend.signaling import manager
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the room cleanup task
+    cleanup_task = asyncio.create_task(manager.cleanup_loop(60))
+    yield
+    # Cleanup task will be cancelled on shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Will be set by app.py at startup
 server_port: int = 9876
@@ -31,9 +46,11 @@ async def info():
 
 
 @app.get("/api/debug")
-async def debug():
+async def debug(room_id: str = "default"):
     """Debug endpoint — shows signaling room state."""
+    room = await manager.get_room(room_id)
     return {
+        "room_id": room_id,
         "peers": list(room._peers.keys()),
         "is_full": room.is_full,
         "peer_count": len(room._peers),
@@ -70,8 +87,10 @@ async def ice_config():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, role: str = "host"):
-    await room.handle(ws, role)
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(ws: WebSocket, room_id: str = "default", role: str = "host", token: str | None = None):
+    room = await manager.get_room(room_id)
+    await room.handle(ws, role, token)
 
 
 # Mount static files last (catch-all).

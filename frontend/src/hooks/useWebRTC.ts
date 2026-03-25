@@ -48,7 +48,8 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   const [connectionState, setConnectionState] = useState("new");
   const [chatChannel, setChatChannel] = useState<RTCDataChannel | null>(null);
   const [fileChannel, setFileChannel] = useState<RTCDataChannel | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream>(new MediaStream());
+  const [remoteStream, setRemoteStream] = useState<MediaStream>(remoteStreamRef.current);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
@@ -154,34 +155,31 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
     };
 
-    // Remote media tracks — use e.track directly
-    const remote = new MediaStream();
-    setRemoteStream(remote);
+    // Remote media tracks — add to stable stream
+    const remote = remoteStreamRef.current;
     pc.ontrack = (e) => {
-      // Only add unmuted live tracks; muted tracks arrive after peer ends call
       if (!e.track.muted) {
         remote.addTrack(e.track);
         setRemoteStream(new MediaStream(remote.getTracks()));
       }
 
-      // Remove ended tracks so stale frames don't linger
       e.track.onended = () => {
         if (remote.getTracks().includes(e.track)) {
           remote.removeTrack(e.track);
+          setRemoteStream(new MediaStream(remote.getTracks()));
         }
-        setRemoteStream(new MediaStream(remote.getTracks()));
       };
       e.track.onmute = () => {
         if (remote.getTracks().includes(e.track)) {
           remote.removeTrack(e.track);
+          setRemoteStream(new MediaStream(remote.getTracks()));
         }
-        setRemoteStream(new MediaStream(remote.getTracks()));
       };
       e.track.onunmute = () => {
         if (!remote.getTracks().includes(e.track)) {
           remote.addTrack(e.track);
+          setRemoteStream(new MediaStream(remote.getTracks()));
         }
-        setRemoteStream(new MediaStream(remote.getTracks()));
       };
     };
 
@@ -197,6 +195,21 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
 
     // Serialized offer creation — prevents duplicate/racing offers
     let peerPresent = false;
+    // Track what was negotiated to prevent infinite renegotiation loops.
+    // The browser fires onnegotiationneeded when data channels are created,
+    // but if we suppress it (peerPresent=false) and later negotiate manually
+    // via peer-joined, the browser may re-fire onnegotiationneeded after the
+    // answer is set (state returns to "stable"), causing an infinite loop.
+    let lastNegotiatedFingerprint = "";
+
+    const getNegotiationFingerprint = (): string => {
+      const pc = pcRef.current;
+      if (!pc) return "";
+      const senders = pc.getSenders().filter((s) => s.track).length;
+      const receivers = pc.getReceivers().filter((r) => r.track?.readyState === "live").length;
+      const channels = (pc as unknown as { sctp?: { maxChannels?: number } }).sctp?.maxChannels ?? "pending";
+      return `s${senders}:r${receivers}:dc${channels}`;
+    };
 
     const enqueueNegotiation = () => {
       negotiationQueueRef.current = negotiationQueueRef.current.then(async () => {
@@ -227,9 +240,16 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     };
 
     // Suppress negotiation until a peer has joined — prevents sending
-    // offers into the void (which leaves the PC stuck in have-local-offer)
+    // offers into the void (which leaves the PC stuck in have-local-offer).
+    // Also prevent redundant renegotiation by checking if anything actually
+    // changed (tracks/channels) since the last negotiation.
     pc.onnegotiationneeded = () => {
-      if (peerPresent) enqueueNegotiation();
+      const fp = getNegotiationFingerprint();
+      log(`RTC onnegotiationneeded fp=${fp} last=${lastNegotiatedFingerprint} peer=${peerPresent}`);
+      if (peerPresent && fp !== lastNegotiatedFingerprint) {
+        lastNegotiatedFingerprint = fp;
+        enqueueNegotiation();
+      }
     };
 
     sig.onMessage(async (msg: SignalingMessage) => {
@@ -275,7 +295,10 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
               log("RTC rolling back stuck have-local-offer");
               await pc.setLocalDescription({ type: "rollback" });
             }
-            log("RTC calling enqueueNegotiation");
+            // Mark the current state as the fingerprint so onnegotiationneeded
+            // doesn't re-trigger for the same data channels we're about to negotiate
+            lastNegotiatedFingerprint = getNegotiationFingerprint();
+            log(`RTC calling enqueueNegotiation (fp=${lastNegotiatedFingerprint})`);
             enqueueNegotiation();
           } else {
             log("RTC joiner waiting for offer");

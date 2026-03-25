@@ -128,6 +128,7 @@ export default function useSignaling(url: string | null): SignalingHook {
 
   useEffect(() => {
     return () => {
+      intentionalCloseRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       wsRef.current?.close();
     };

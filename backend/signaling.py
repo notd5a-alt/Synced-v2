@@ -1,130 +1,208 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from typing import Dict
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger("ghostchat.signaling")
 
 MAX_MESSAGE_SIZE = 65536  # 64 KB
-ALLOWED_TYPES = {"offer", "answer", "ice-candidate"}
+ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong"}
 VALID_ROLES = {"host", "join"}
 
 
 class SignalingRoom:
     """Pairs exactly two WebSocket peers (host + join) and relays messages between them."""
 
-    def __init__(self):
-        self._peers: dict[str, WebSocket] = {}  # role -> WebSocket
+    def __init__(self, room_id: str):
+        self.room_id = room_id
+        self._peers: Dict[str, WebSocket] = {}  # role -> WebSocket
+        self._tokens: Dict[str, str] = {}       # role -> token
+        self._lock = asyncio.Lock()
 
     @property
     def is_full(self) -> bool:
         return "host" in self._peers and "join" in self._peers
 
-    def _other(self, ws: WebSocket) -> WebSocket | None:
-        for peer in self._peers.values():
-            if peer is not ws:
-                return peer
-        return None
-
-    async def connect(self, ws: WebSocket, role: str) -> bool:
-        """Add a peer by role. Duplicate role replaces the old connection."""
+    async def connect(self, ws: WebSocket, role: str, token: str | None = None) -> bool:
+        """Add a peer by role. Duplicate role replaces the old connection if token matches."""
         if role not in VALID_ROLES:
-            logger.warning("rejected invalid role: %r", role)
+            logger.warning("[%s] rejected invalid role: %r", self.room_id, role)
             return False
 
-        # If this role already has a connection, close the old one
-        if role in self._peers:
-            old = self._peers[role]
-            logger.info("replacing stale %s connection", role)
-            try:
-                await old.close(code=4001, reason="Replaced by new connection")
-            except Exception:
-                pass
-            del self._peers[role]
+        async with self._lock:
+            # If this role already has a connection, check token if it exists
+            if role in self._peers:
+                existing_token = self._tokens.get(role)
+                if existing_token and token != existing_token:
+                    logger.warning("[%s] rejection: %s role hijacking attempt (invalid token)", self.room_id, role)
+                    return False
+                
+                old = self._peers[role]
+                logger.info("[%s] replacing stale %s connection", self.room_id, role)
+                try:
+                    await old.close(code=4001, reason="Replaced by new connection")
+                except Exception:
+                    pass
 
-        await ws.accept()
-        self._peers[role] = ws
-        logger.info("peer connected (%s, %d/2 in room), peers=%s",
-                     role, len(self._peers), list(self._peers.keys()))
+            await ws.accept()
+            self._peers[role] = ws
+            if token:
+                self._tokens[role] = token
+            
+            logger.info("[%s] peer connected (%s, %d/2 in room), peers=%s",
+                         self.room_id, role, len(self._peers), list(self._peers.keys()))
 
-        # Notify both sides when both roles are filled
-        if self.is_full:
-            logger.info("room full — sending peer-joined to both")
-            for peer in self._peers.values():
-                await peer.send_json({"type": "peer-joined"})
+            # Notify both sides when both roles are filled
+            if self.is_full:
+                logger.info("[%s] room full — sending peer-joined to both", self.room_id)
+                for peer in self._peers.values():
+                    try:
+                        await peer.send_json({"type": "peer-joined"})
+                    except Exception as e:
+                        logger.warning("[%s] failed to send peer-joined: %s", self.room_id, e)
         return True
 
     async def disconnect(self, ws: WebSocket):
-        role_to_remove = None
-        for role, peer in self._peers.items():
-            if peer is ws:
-                role_to_remove = role
-                break
-        if role_to_remove:
-            del self._peers[role_to_remove]
-            logger.info("peer disconnected (%s, %d/2 in room)", role_to_remove, len(self._peers))
-            other = next(iter(self._peers.values()), None)
-            if other:
-                try:
-                    await other.send_json({"type": "peer-disconnected"})
-                except Exception:
-                    pass
+        async with self._lock:
+            role_to_remove = None
+            for role, peer in self._peers.items():
+                if peer is ws:
+                    role_to_remove = role
+                    break
+            if role_to_remove:
+                del self._peers[role_to_remove]
+                # We keep the token for a while to allow the SAME user to reconnect
+                # but it will be cleared if the room becomes empty and is deleted by RoomManager
+                logger.info("[%s] peer disconnected (%s, %d/2 in room)", self.room_id, role_to_remove, len(self._peers))
+                
+                # Notify the other peer if they're still connected
+                other = next(iter(self._peers.values()), None)
+                if other:
+                    try:
+                        await other.send_json({"type": "peer-disconnected"})
+                    except Exception:
+                        pass
 
     def _validate(self, data: str) -> bool:
         """Check message size and structure."""
         if len(data) > MAX_MESSAGE_SIZE:
-            logger.warning("message too large (%d bytes), dropping", len(data))
+            logger.warning("[%s] message too large (%d bytes), dropping", self.room_id, len(data))
             return False
         try:
             msg = json.loads(data)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("invalid JSON, dropping")
+            logger.warning("[%s] invalid JSON, dropping", self.room_id)
             return False
         msg_type = msg.get("type")
         if msg_type not in ALLOWED_TYPES:
-            logger.warning("unknown message type %r, dropping", msg_type)
+            logger.warning("[%s] unknown message type %r, dropping", self.room_id, msg_type)
             return False
         return True
 
     async def relay(self, ws: WebSocket, data: str):
         """Forward a validated message from one peer to the other."""
-        other = self._other(ws)
+        # Note: relay doesn't strictly need the lock since it doesn't modify _peers structure,
+        # but we should be careful about other peer disconnecting during relay.
+        other = None
+        async with self._lock:
+            for peer in self._peers.values():
+                if peer is not ws:
+                    other = peer
+                    break
+        
         if other:
             try:
-                msg_type = json.loads(data).get("type", "?")
-                logger.info("relaying %s message", msg_type)
+                # We already validated 'data' in handle() so we know it's valid JSON
+                msg = json.loads(data)
+                msg_type = msg.get("type", "?")
+                logger.info("[%s] relaying %s message", self.room_id, msg_type)
                 await other.send_text(data)
             except WebSocketDisconnect:
-                logger.warning("relay failed, peer disconnected")
+                logger.warning("[%s] relay failed, peer disconnected", self.room_id)
                 await self.disconnect(other)
             except Exception as e:
-                logger.warning("relay send failed: %s", e)
+                logger.warning("[%s] relay send failed: %s", self.room_id, e)
         else:
-            logger.warning("relay: no other peer to send to")
+            logger.warning("[%s] relay: no other peer to send to", self.room_id)
 
-    async def handle(self, ws: WebSocket, role: str):
+    async def handle(self, ws: WebSocket, role: str, token: str | None = None):
         """Full lifecycle: connect, relay messages, handle disconnect."""
-        accepted = await self.connect(ws, role)
+        accepted = await self.connect(ws, role, token)
         if not accepted:
             await ws.close(code=4000, reason="Invalid role")
             return
+        
+        # Start a heartbeat task for this connection
+        heartbeat_task = asyncio.create_task(self._heartbeat(ws))
+        
         try:
             while True:
                 data = await ws.receive_text()
                 if self._validate(data):
-                    await self.relay(ws, data)
+                    # We only relay offer/answer/ice-candidate
+                    msg = json.loads(data)
+                    if msg.get("type") in {"offer", "answer", "ice-candidate"}:
+                        await self.relay(ws, data)
+                    # pings/pongs are consumed here, not relayed
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            logger.error("signaling handler error: %s", e)
+            logger.error("[%s] signaling handler error: %s", self.room_id, e)
         finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             try:
                 await self.disconnect(ws)
             except Exception as e:
-                logger.error("disconnect cleanup failed: %s", e)
+                logger.error("[%s] disconnect cleanup failed: %s", self.room_id, e)
+
+    async def _heartbeat(self, ws: WebSocket, interval: int = 30):
+        """Periodically send a ping to keep connection alive."""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                # FastAPI doesn't have a direct 'ping' for WebSocket, we use a small JSON
+                await ws.send_json({"type": "ping"})
+        except Exception:
+            # If sending fails, the main loop will eventually catch it too
+            pass
 
 
-# Single global room (1-on-1 app)
-room = SignalingRoom()
+class RoomManager:
+    """Manages multiple signaling rooms."""
+
+    def __init__(self):
+        self._rooms: Dict[str, SignalingRoom] = {}
+        self._lock = asyncio.Lock()
+
+    async def get_room(self, room_id: str) -> SignalingRoom:
+        async with self._lock:
+            if room_id not in self._rooms:
+                self._rooms[room_id] = SignalingRoom(room_id)
+            return self._rooms[room_id]
+
+    async def remove_empty_rooms(self):
+        """Cleanup task to remove rooms with no peers."""
+        async with self._lock:
+            empty_rooms = [rid for rid, r in self._rooms.items() if not r._peers]
+            if empty_rooms:
+                logger.info("Cleaning up %d empty rooms: %s", len(empty_rooms), empty_rooms)
+            for rid in empty_rooms:
+                del self._rooms[rid]
+
+    async def cleanup_loop(self, interval: int = 60):
+        """Infinite loop to periodically remove empty rooms."""
+        while True:
+            await asyncio.sleep(interval)
+            await self.remove_empty_rooms()
+
+
+# Global room manager
+manager = RoomManager()
