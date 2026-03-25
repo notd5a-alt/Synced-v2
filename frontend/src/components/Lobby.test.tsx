@@ -8,6 +8,8 @@ const defaultProps = {
   hostAddr: '192.168.1.100:9876',
   connectionState: 'new',
   signalingState: 'open' as const,
+  signalingUrl: 'ws://localhost:9876/ws?role=host',
+  debugLog: [] as string[],
   timeoutExpired: false,
   onRetry: vi.fn(),
   onCancel: vi.fn(),

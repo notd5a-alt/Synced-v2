@@ -36,14 +36,23 @@ async def test_ice_config_returns_stun_servers(client):
 
 
 @pytest.mark.anyio
-async def test_ice_config_includes_turn_fallback(client):
+async def test_ice_config_stun_only_without_turn_env(client):
+    """Without TURN env vars, only STUN servers are returned (zero-trust)."""
     resp = await client.get("/api/ice-config")
     data = resp.json()
     servers = data["iceServers"]
-    # Should have TURN fallback (3rd entry when no env vars set)
-    turn_server = servers[-1]
-    assert "username" in turn_server
-    assert "credential" in turn_server
+    # Should have exactly 2 STUN servers, no TURN fallback
+    assert len(servers) == 2
+    for s in servers:
+        assert "username" not in s
+        assert "credential" not in s
+
+
+@pytest.mark.anyio
+async def test_debug_endpoint_gated(client):
+    """Debug endpoint returns 404 unless GHOSTCHAT_DEBUG=1."""
+    resp = await client.get("/api/debug")
+    assert resp.status_code == 404
 
 
 @pytest.mark.anyio

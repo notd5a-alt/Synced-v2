@@ -76,7 +76,7 @@ export default function App() {
       setHostAddr(window.location.host);
     }
     const wsUrl = `${wsProto}://${window.location.host}/ws?role=host`;
-    console.log("[ghostchat] hosting:", wsUrl);
+    // debug: hosting wsUrl is logged to signaling debugLog instead
     setSigUrl(wsUrl);
     setScreen("lobby");
   }, [wsProto]);
@@ -88,7 +88,7 @@ export default function App() {
     // Only use the page protocol when the address matches the current origin.
     const proto = addr === window.location.host ? wsProto : "ws";
     const wsUrl = `${proto}://${addr}/ws?role=join`;
-    console.log("[ghostchat] joining:", wsUrl);
+    // debug: joining wsUrl is logged to signaling debugLog instead
     setSigUrl(wsUrl);
     setScreen("lobby");
   }, [wsProto]);

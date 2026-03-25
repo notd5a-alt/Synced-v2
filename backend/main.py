@@ -1,30 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
+import traceback
 from pathlib import Path
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from backend.signaling import manager
+from backend.signaling import manager, RoomLimitError
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Start the room cleanup task
-    cleanup_task = asyncio.create_task(manager.cleanup_loop(60))
-    yield
-    # Cleanup task will be cancelled on shutdown
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
-
-
-app = FastAPI(lifespan=lifespan)
+logger = logging.getLogger("ghostchat.server")
 
 # Will be set by app.py at startup
 server_port: int = 9876
@@ -40,6 +32,79 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
+# ---------------------------------------------------------------------------
+# Security headers middleware
+# ---------------------------------------------------------------------------
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    cleanup_task = asyncio.create_task(manager.cleanup_loop(60))
+    yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+# Security headers
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS — allow localhost and LAN origins only
+_lan_ip = None
+
+def _get_allowed_origins() -> list[str]:
+    global _lan_ip
+    if _lan_ip is None:
+        _lan_ip = get_local_ip()
+    origins = [
+        "http://localhost:9876",
+        "http://127.0.0.1:9876",
+        f"http://{_lan_ip}:9876",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        f"http://{_lan_ip}:5173",
+        "https://localhost:5173",
+        "https://127.0.0.1:5173",
+        f"https://{_lan_ip}:5173",
+        "tauri://localhost",
+    ]
+    return origins
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_get_allowed_origins(),
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — never leak stack traces
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception on %s %s:\n%s",
+                 request.method, request.url.path, traceback.format_exc())
+    return JSONResponse(status_code=500, content={"error": "internal server error"})
+
+
+# ---------------------------------------------------------------------------
+# API routes
+# ---------------------------------------------------------------------------
 @app.get("/api/info")
 async def info():
     return {"ip": get_local_ip(), "port": server_port}
@@ -47,7 +112,9 @@ async def info():
 
 @app.get("/api/debug")
 async def debug(room_id: str = "default"):
-    """Debug endpoint — shows signaling room state."""
+    """Debug endpoint — only available when GHOSTCHAT_DEBUG=1."""
+    if os.environ.get("GHOSTCHAT_DEBUG") != "1":
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
     room = await manager.get_room(room_id)
     return {
         "room_id": room_id,
@@ -72,30 +139,60 @@ async def ice_config():
             "username": turn_user,
             "credential": turn_cred,
         })
-    else:
-        # Free Open Relay TURN servers as fallback for symmetric NAT traversal
-        servers.append({
-            "urls": [
-                "turn:openrelay.metered.ca:80",
-                "turn:openrelay.metered.ca:443",
-                "turns:openrelay.metered.ca:443",
-            ],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        })
+    # No public TURN fallback — for zero-trust, TURN must be self-hosted.
+    # Without TURN, peers behind symmetric NAT may fail to connect directly.
     return {"iceServers": servers}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket origin validation
+# ---------------------------------------------------------------------------
+_ALLOWED_WS_ORIGINS: set[str] | None = None
+
+def _get_allowed_ws_origins() -> set[str]:
+    global _ALLOWED_WS_ORIGINS
+    if _ALLOWED_WS_ORIGINS is None:
+        lan = get_local_ip()
+        _ALLOWED_WS_ORIGINS = {
+            f"http://localhost:{server_port}",
+            f"http://127.0.0.1:{server_port}",
+            f"http://{lan}:{server_port}",
+            # Vite dev server
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            f"http://{lan}:5173",
+            "https://localhost:5173",
+            "https://127.0.0.1:5173",
+            f"https://{lan}:5173",
+            # Tauri
+            "tauri://localhost",
+        }
+    return _ALLOWED_WS_ORIGINS
 
 
 @app.websocket("/ws")
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(ws: WebSocket, room_id: str = "default", role: str = "host", token: str | None = None):
-    room = await manager.get_room(room_id)
+    # Validate origin
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    allowed = _get_allowed_ws_origins()
+    if origin and origin not in allowed:
+        logger.warning("Rejected WebSocket from origin %r (allowed: %s)", origin, allowed)
+        await ws.close(code=4003, reason="Forbidden origin")
+        return
+
+    try:
+        room = await manager.get_room(room_id)
+    except RoomLimitError:
+        logger.warning("Room limit reached, rejecting WebSocket for room %s", room_id)
+        await ws.close(code=4004, reason="Server at capacity")
+        return
     await room.handle(ws, role, token)
 
 
-# Mount static files last (catch-all).
-# When running inside a PyInstaller bundle, __file__ points to a temp dir,
-# so we also check sys._MEIPASS (PyInstaller's extraction root).
+# ---------------------------------------------------------------------------
+# Static files (catch-all, must be last)
+# ---------------------------------------------------------------------------
 import sys
 
 static_dir = Path(__file__).parent / "static"

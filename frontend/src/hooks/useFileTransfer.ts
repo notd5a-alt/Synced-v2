@@ -10,6 +10,7 @@ import { playFileComplete } from "../utils/sounds";
 import type { IncomingFile, OutgoingFile, FileTransferStatus } from "../types";
 
 const CHUNK_SIZE = 16384; // 16 KB
+const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB — compressed in memory, so limit to avoid OOM
 
 interface PendingFile {
   name: string;
@@ -379,6 +380,19 @@ export default function useFileTransfer(
     if (!ch || ch.readyState !== "open") return;
     const key = hmacKeyRef.current;
 
+    if (file.size > MAX_FILE_SIZE) {
+      setOutgoing({
+        id: "error",
+        name: file.name,
+        size: file.size,
+        compressedSize: 0,
+        bytesSent: 0,
+        status: "failed" as FileTransferStatus,
+      });
+      setTimeout(() => setOutgoing(null), 5000);
+      return;
+    }
+
     sendLockRef.current = true;
     const id = crypto.randomUUID();
 
@@ -465,12 +479,19 @@ export default function useFileTransfer(
       sendResolveRef.current = null;
     }
 
-    // Cancel incoming
+    // Cancel incoming — revoke any blob URL to prevent memory leaks
     delete pendingRef.current[id];
     setIncoming((prev) =>
-      prev.map((f) =>
-        f.id === id ? { ...f, status: "failed" as FileTransferStatus, error: "Cancelled" } : f
-      )
+      prev.map((f) => {
+        if (f.id === id) {
+          if (f.blobUrl) {
+            URL.revokeObjectURL(f.blobUrl);
+            blobUrlsRef.current = blobUrlsRef.current.filter((u) => u !== f.blobUrl);
+          }
+          return { ...f, status: "failed" as FileTransferStatus, error: "Cancelled" };
+        }
+        return f;
+      })
     );
 
     // Notify peer

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Dict
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -10,6 +11,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 logger = logging.getLogger("ghostchat.signaling")
 
 MAX_MESSAGE_SIZE = 65536  # 64 KB
+MAX_ROOMS = 100           # Cap total rooms (= 200 max connections)
+HEARTBEAT_INTERVAL = 30   # seconds between pings
+HEARTBEAT_TIMEOUT = 90    # close if no pong within this many seconds
 ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong"}
 VALID_ROLES = {"host", "join"}
 
@@ -21,6 +25,7 @@ class SignalingRoom:
         self.room_id = room_id
         self._peers: Dict[str, WebSocket] = {}  # role -> WebSocket
         self._tokens: Dict[str, str] = {}       # role -> token
+        self._last_pong: Dict[str, float] = {}  # role -> timestamp
         self._lock = asyncio.Lock()
 
     @property
@@ -40,7 +45,7 @@ class SignalingRoom:
                 if existing_token and token != existing_token:
                     logger.warning("[%s] rejection: %s role hijacking attempt (invalid token)", self.room_id, role)
                     return False
-                
+
                 old = self._peers[role]
                 logger.info("[%s] replacing stale %s connection", self.room_id, role)
                 try:
@@ -50,9 +55,10 @@ class SignalingRoom:
 
             await ws.accept()
             self._peers[role] = ws
+            self._last_pong[role] = time.monotonic()
             if token:
                 self._tokens[role] = token
-            
+
             logger.info("[%s] peer connected (%s, %d/2 in room), peers=%s",
                          self.room_id, role, len(self._peers), list(self._peers.keys()))
 
@@ -75,10 +81,11 @@ class SignalingRoom:
                     break
             if role_to_remove:
                 del self._peers[role_to_remove]
+                self._last_pong.pop(role_to_remove, None)
                 # We keep the token for a while to allow the SAME user to reconnect
                 # but it will be cleared if the room becomes empty and is deleted by RoomManager
                 logger.info("[%s] peer disconnected (%s, %d/2 in room)", self.room_id, role_to_remove, len(self._peers))
-                
+
                 # Notify the other peer if they're still connected
                 other = next(iter(self._peers.values()), None)
                 if other:
@@ -86,6 +93,13 @@ class SignalingRoom:
                         await other.send_json({"type": "peer-disconnected"})
                     except Exception:
                         pass
+
+    def _get_role(self, ws: WebSocket) -> str | None:
+        """Return the role for a given WebSocket, or None."""
+        for role, peer in self._peers.items():
+            if peer is ws:
+                return role
+        return None
 
     def _validate(self, data: str) -> bool:
         """Check message size and structure."""
@@ -105,18 +119,15 @@ class SignalingRoom:
 
     async def relay(self, ws: WebSocket, data: str):
         """Forward a validated message from one peer to the other."""
-        # Note: relay doesn't strictly need the lock since it doesn't modify _peers structure,
-        # but we should be careful about other peer disconnecting during relay.
         other = None
         async with self._lock:
             for peer in self._peers.values():
                 if peer is not ws:
                     other = peer
                     break
-        
+
         if other:
             try:
-                # We already validated 'data' in handle() so we know it's valid JSON
                 msg = json.loads(data)
                 msg_type = msg.get("type", "?")
                 logger.info("[%s] relaying %s message", self.room_id, msg_type)
@@ -135,19 +146,24 @@ class SignalingRoom:
         if not accepted:
             await ws.close(code=4000, reason="Invalid role")
             return
-        
+
         # Start a heartbeat task for this connection
-        heartbeat_task = asyncio.create_task(self._heartbeat(ws))
-        
+        heartbeat_task = asyncio.create_task(self._heartbeat(ws, role))
+
         try:
             while True:
                 data = await ws.receive_text()
                 if self._validate(data):
-                    # We only relay offer/answer/ice-candidate
                     msg = json.loads(data)
-                    if msg.get("type") in {"offer", "answer", "ice-candidate"}:
+                    msg_type = msg.get("type")
+                    if msg_type in {"offer", "answer", "ice-candidate"}:
                         await self.relay(ws, data)
-                    # pings/pongs are consumed here, not relayed
+                    elif msg_type == "pong":
+                        # Update pong timestamp for heartbeat timeout detection
+                        r = self._get_role(ws)
+                        if r:
+                            self._last_pong[r] = time.monotonic()
+                    # pings are consumed here, not relayed
         except WebSocketDisconnect:
             pass
         except Exception as e:
@@ -163,12 +179,22 @@ class SignalingRoom:
             except Exception as e:
                 logger.error("[%s] disconnect cleanup failed: %s", self.room_id, e)
 
-    async def _heartbeat(self, ws: WebSocket, interval: int = 30):
-        """Periodically send a ping to keep connection alive."""
+    async def _heartbeat(self, ws: WebSocket, role: str):
+        """Periodically send a ping and close connection if no pong received."""
         try:
             while True:
-                await asyncio.sleep(interval)
-                # FastAPI doesn't have a direct 'ping' for WebSocket, we use a small JSON
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                # Check for pong timeout
+                last = self._last_pong.get(role, 0)
+                if time.monotonic() - last > HEARTBEAT_TIMEOUT:
+                    logger.warning("[%s] heartbeat timeout for %s (no pong in %ds), closing",
+                                   self.room_id, role, HEARTBEAT_TIMEOUT)
+                    try:
+                        await ws.close(code=4002, reason="Heartbeat timeout")
+                    except Exception:
+                        pass
+                    return
+                # Send ping
                 await ws.send_json({"type": "ping"})
         except Exception:
             # If sending fails, the main loop will eventually catch it too
@@ -185,6 +211,8 @@ class RoomManager:
     async def get_room(self, room_id: str) -> SignalingRoom:
         async with self._lock:
             if room_id not in self._rooms:
+                if len(self._rooms) >= MAX_ROOMS:
+                    raise RoomLimitError(f"Maximum rooms ({MAX_ROOMS}) reached")
                 self._rooms[room_id] = SignalingRoom(room_id)
             return self._rooms[room_id]
 
@@ -202,6 +230,11 @@ class RoomManager:
         while True:
             await asyncio.sleep(interval)
             await self.remove_empty_rooms()
+
+
+class RoomLimitError(Exception):
+    """Raised when the maximum number of rooms is reached."""
+    pass
 
 
 # Global room manager

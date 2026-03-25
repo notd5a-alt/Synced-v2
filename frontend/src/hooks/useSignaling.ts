@@ -36,14 +36,14 @@ export default function useSignaling(url: string | null): SignalingHook {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("[signaling] open:", currentUrl);
+      // Connection state logged via addLog to debug panel
       addLog(`WS open`);
       setState("open");
       wasEverOpenRef.current = true;
       reconnectAttemptRef.current = 0;
     };
     ws.onclose = (event: CloseEvent) => {
-      console.log("[signaling] closed: code=%d reason=%s", event.code, event.reason);
+      // Connection state logged via addLog to debug panel
       addLog(`WS closed code=${event.code} reason=${event.reason}`);
       wsRef.current = null;
 

@@ -54,6 +54,14 @@ jobs:
         with:
           crate: tauri-cli
 
+      # --- Run tests ---
+      - name: Run backend tests
+        run: python -m pytest backend/tests/ -v
+
+      - name: Run frontend tests
+        run: npm run test -- --run
+        working-directory: frontend
+
       # --- Step 1: Build frontend ---
       - name: Build frontend
         run: npm run build
