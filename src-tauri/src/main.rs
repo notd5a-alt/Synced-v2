@@ -45,13 +45,13 @@ fn main() {
         .setup(move |app| {
             if is_production() {
                 // Production: spawn the Python sidecar (FastAPI backend)
-                let sidecar = app
+                let sidecar_cmd = app
                     .shell()
-                    .sidecar("binaries/ghostchat-server")
+                    .sidecar("ghostchat-server")
                     .expect("failed to create sidecar command")
                     .args(["--port", &port.to_string()]);
 
-                let (mut rx, child) = sidecar
+                let (mut rx, child) = sidecar_cmd
                     .spawn()
                     .expect("failed to spawn ghostchat-server sidecar");
 
