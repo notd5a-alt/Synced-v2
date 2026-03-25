@@ -1,0 +1,59 @@
+import { useState, useEffect, useRef } from "react";
+
+/**
+ * Measures microphone input level (0-100) from an audio stream.
+ * Used to show a real-time sensitivity meter on the call UI.
+ */
+export default function useMicLevel(stream: MediaStream | null): number {
+  const [level, setLevel] = useState(0);
+  const ctxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    if (!stream) {
+      setLevel(0);
+      return;
+    }
+
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack || !audioTrack.enabled) {
+      setLevel(0);
+      return;
+    }
+
+    let ctx: AudioContext;
+    try {
+      ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    } catch {
+      return;
+    }
+    ctxRef.current = ctx;
+
+    const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.8;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    const interval = setInterval(() => {
+      if (ctx.state === "suspended") ctx.resume();
+      analyser.getByteFrequencyData(data);
+      // Use RMS for smoother, more representative level
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / data.length);
+      // Normalize to 0-100 (255 is max byte value)
+      const normalized = Math.min(100, Math.round((rms / 128) * 100));
+      setLevel(normalized);
+    }, 50);
+
+    return () => {
+      clearInterval(interval);
+      source.disconnect();
+      ctx.close().catch(() => {});
+      ctxRef.current = null;
+    };
+  }, [stream]);
+
+  return level;
+}

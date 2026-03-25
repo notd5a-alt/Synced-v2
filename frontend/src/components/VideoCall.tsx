@@ -3,6 +3,7 @@ import AudioVisualizer from "./AudioVisualizer";
 import GhostAsciiArt from "./GhostAsciiArt";
 import DiagnosticsPanel from "./DiagnosticsPanel";
 import type { ConnectionStats, ConnectionQuality, ConnectionType, AudioProcessingState } from "../types";
+import type { AudioDevicesHook } from "../hooks/useAudioDevices";
 
 interface VideoCallProps {
   localStream: MediaStream | null;
@@ -25,6 +26,9 @@ interface VideoCallProps {
   stats: ConnectionStats | null;
   localSpeaking: boolean;
   remoteSpeaking: boolean;
+  audioDevices: AudioDevicesHook;
+  micLevel: number;
+  remoteAudioRef: React.RefObject<HTMLVideoElement | null>;
 }
 
 export default function VideoCall({
@@ -48,6 +52,9 @@ export default function VideoCall({
   stats,
   localSpeaking,
   remoteSpeaking,
+  audioDevices,
+  micLevel,
+  remoteAudioRef,
 }: VideoCallProps) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLVideoElement>(null);
@@ -57,6 +64,12 @@ export default function VideoCall({
   const [isPip, setIsPip] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiag, setShowDiag] = useState(false);
+  const [showDevices, setShowDevices] = useState(false);
+
+  // Share remoteRef with parent so useAudioDevices can call setSinkId on it
+  useEffect(() => {
+    if (remoteAudioRef) (remoteAudioRef as React.MutableRefObject<HTMLVideoElement | null>).current = remoteRef.current;
+  }, [remoteAudioRef]);
 
   useEffect(() => {
     if (localRef.current) localRef.current.srcObject = localStream || null;
@@ -219,6 +232,48 @@ export default function VideoCall({
         <p className="call-warning">Signaling reconnecting...</p>
       )}
       {callError && <p className="call-error">{callError}</p>}
+      {showDevices && inCall && (
+        <div className="device-selector-panel">
+          <div className="device-selector-row">
+            <label className="device-label">MIC:</label>
+            <select
+              className="device-select"
+              value={audioDevices.selectedInput}
+              onChange={(e) => audioDevices.setInputDevice(e.target.value)}
+            >
+              {audioDevices.inputDevices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+            <div className="mic-level-bar">
+              <div
+                className="mic-level-fill"
+                style={{ width: `${micLevel}%` }}
+              />
+            </div>
+          </div>
+          <div className="device-selector-row">
+            <label className="device-label">OUT:</label>
+            <select
+              className="device-select"
+              value={audioDevices.selectedOutput}
+              onChange={(e) => audioDevices.setOutputDevice(e.target.value)}
+            >
+              {audioDevices.outputDevices.length === 0 ? (
+                <option value="">Default</option>
+              ) : (
+                audioDevices.outputDevices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        </div>
+      )}
       <div className="call-controls">
         {!inCall ? (
           <div className="controls-center">
@@ -255,6 +310,12 @@ export default function VideoCall({
                 onClick={() => onToggleAudioProcessing("echoCancellation")}
               >
                 {audioProcessing?.echoCancellation ? "[ EC ON ]" : "[ EC OFF ]"}
+              </button>
+              <button
+                className={`btn ${showDevices ? "active" : ""}`}
+                onClick={() => setShowDevices((d) => !d)}
+              >
+                [ DEVICES ]
               </button>
             </div>
             <div className="controls-center">

@@ -25,9 +25,11 @@ export interface WebRTCHook {
   getFingerprint: () => string | null;
   callError: string | null;
   pcRef: MutableRefObject<RTCPeerConnection | null>;
+  localStreamRef: MutableRefObject<MediaStream | null>;
   hmacKey: CryptoKey | null;
   audioProcessing: AudioProcessingState;
   toggleAudioProcessing: (key: keyof AudioProcessingState) => Promise<void>;
+  setLocalStream: (fn: (s: MediaStream | null) => MediaStream | null) => void;
   /** Increments on cleanup — used to trigger re-init from App.tsx */
   reinitCounter: number;
 }
@@ -617,9 +619,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     getFingerprint,
     callError,
     pcRef,
+    localStreamRef,
     hmacKey,
     audioProcessing,
     toggleAudioProcessing,
+    setLocalStream,
     reinitCounter,
   };
 }

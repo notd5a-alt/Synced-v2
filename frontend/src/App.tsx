@@ -6,6 +6,8 @@ import useDataChannel from "./hooks/useDataChannel";
 import useFileTransfer from "./hooks/useFileTransfer";
 import useVAD from "./hooks/useVAD";
 import useTheme from "./hooks/useTheme";
+import useAudioDevices from "./hooks/useAudioDevices";
+import useMicLevel from "./hooks/useMicLevel";
 import Home from "./components/Home";
 import Lobby from "./components/Lobby";
 import Chat from "./components/Chat";
@@ -38,6 +40,14 @@ export default function App() {
   const chat = useDataChannel(webrtc.chatChannel, webrtc.hmacKey);
   const files = useFileTransfer(webrtc.fileChannel, webrtc.hmacKey);
   const vad = useVAD(webrtc.localStream, webrtc.remoteStream);
+  const remoteAudioRef = useRef<HTMLVideoElement | null>(null);
+  const audioDevices = useAudioDevices(
+    webrtc.localStreamRef,
+    webrtc.pcRef,
+    remoteAudioRef,
+    webrtc.setLocalStream,
+  );
+  const micLevel = useMicLevel(webrtc.localStream);
 
   // Transition to session once WebRTC connects
   useEffect(() => {
@@ -471,6 +481,9 @@ export default function App() {
             stats={monitor.stats}
             localSpeaking={vad.localSpeaking}
             remoteSpeaking={vad.remoteSpeaking}
+            audioDevices={audioDevices}
+            micLevel={micLevel}
+            remoteAudioRef={remoteAudioRef}
           />
         )}
         {activeTab === "files" && (

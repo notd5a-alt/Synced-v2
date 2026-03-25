@@ -731,6 +731,54 @@ input[type="text"]:focus:placeholder-shown {
   background: var(--surface-highest);
   color: var(--text);
 }
+/* Device selector panel */
+.device-selector-panel {
+  padding: 8px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.device-selector-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.device-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  min-width: 32px;
+  font-family: inherit;
+}
+.device-select {
+  flex: 1;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  max-width: 300px;
+  cursor: pointer;
+}
+.device-select:focus {
+  outline: 1px solid var(--primary);
+}
+.mic-level-bar {
+  width: 80px;
+  height: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.mic-level-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.05s linear;
+}
+
 .call-controls {
   display: flex;
   align-items: center;
