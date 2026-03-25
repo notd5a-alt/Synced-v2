@@ -28,6 +28,8 @@ export interface WebRTCHook {
   hmacKey: CryptoKey | null;
   audioProcessing: AudioProcessingState;
   toggleAudioProcessing: (key: keyof AudioProcessingState) => Promise<void>;
+  /** Increments on cleanup — used to trigger re-init from App.tsx */
+  reinitCounter: number;
 }
 
 export default function useWebRTC(signaling: SignalingHook, isHost: boolean): WebRTCHook {
@@ -46,6 +48,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   const screenStreamRef = useRef<MediaStream | null>(null);
 
   const [connectionState, setConnectionState] = useState("new");
+  const [reinitCounter, setReinitCounter] = useState(0);
   const [chatChannel, setChatChannel] = useState<RTCDataChannel | null>(null);
   const [fileChannel, setFileChannel] = useState<RTCDataChannel | null>(null);
   const remoteStreamRef = useRef<MediaStream>(new MediaStream());
@@ -115,6 +118,9 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     setHmacKey(null);
     setAudioProcessing({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
     setConnectionState("new");
+    // Bump counter so the init effect in App.tsx re-fires even when
+    // connectionState was already "new" (no answer received yet)
+    setReinitCounter((c) => c + 1);
   }, []);
 
   const init = useCallback((iceConfig: RTCConfiguration | null) => {
@@ -613,5 +619,6 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     hmacKey,
     audioProcessing,
     toggleAudioProcessing,
+    reinitCounter,
   };
 }
