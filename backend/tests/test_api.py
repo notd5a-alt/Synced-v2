@@ -1,0 +1,55 @@
+"""Tests for the REST API endpoints."""
+
+import pytest
+from httpx import AsyncClient, ASGITransport
+
+from backend.main import app
+
+
+@pytest.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.mark.anyio
+async def test_info_returns_ip_and_port(client):
+    resp = await client.get("/api/info")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "ip" in data
+    assert "port" in data
+    assert isinstance(data["port"], int)
+
+
+@pytest.mark.anyio
+async def test_ice_config_returns_stun_servers(client):
+    resp = await client.get("/api/ice-config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "iceServers" in data
+    servers = data["iceServers"]
+    assert len(servers) >= 2
+    # First server should be Google STUN
+    assert "stun:stun.l.google.com:19302" in servers[0]["urls"]
+
+
+@pytest.mark.anyio
+async def test_ice_config_includes_turn_fallback(client):
+    resp = await client.get("/api/ice-config")
+    data = resp.json()
+    servers = data["iceServers"]
+    # Should have TURN fallback (3rd entry when no env vars set)
+    turn_server = servers[-1]
+    assert "username" in turn_server
+    assert "credential" in turn_server
+
+
+@pytest.mark.anyio
+async def test_info_ip_is_string(client):
+    resp = await client.get("/api/info")
+    data = resp.json()
+    assert isinstance(data["ip"], str)
+    # Should look like an IP address (contains dots)
+    assert "." in data["ip"]

@@ -12,15 +12,29 @@ GhostChat is a zero-trust peer-to-peer desktop app for 1-on-1 voice/video calls,
 - `npm run dev` — Vite dev server on 0.0.0.0 (proxies `/ws` and `/api` to backend on port 9876)
 - `npm run build` — builds React app into `backend/static/`
 - `npm run lint` — ESLint
+- `npm run test` — Vitest (54 frontend tests)
+- `npm run storybook` — Storybook on port 6006
 
 ### Backend
-- `python app.py --dev --port 9876` — runs backend only (no pywebview window), use with Vite dev server
-- `python app.py` — production mode: serves built frontend from `backend/static/`, opens pywebview window
+- `python app.py --port 9876` — runs backend server (use with Vite dev server or Tauri dev)
+- `python -m pytest backend/tests/` — run backend tests (19 tests)
 
-### Full dev workflow
+### Full dev workflow (browser)
 Run in two terminals:
 1. `python app.py --dev` — backend on port 9876
 2. `cd frontend && npm run dev` — frontend on port 5173, proxies API/WS to backend
+
+### Tauri dev workflow
+Run in two terminals:
+1. `python app.py --dev` — backend on port 9876
+2. `cd src-tauri && cargo tauri dev` — native window pointing at backend
+
+### Tauri production build
+```bash
+cd frontend && npm run build           # build frontend → backend/static/
+./scripts/build-sidecar.sh             # PyInstaller → src-tauri/binaries/
+cd src-tauri && cargo tauri build       # produces platform installer
+```
 
 ### HTTPS for LAN/phone testing
 Place `certs/cert.pem` and `certs/key.pem` (e.g., from mkcert) in the project root. Vite auto-detects them and enables HTTPS. Required for `getUserMedia` on non-localhost origins.
@@ -28,6 +42,13 @@ Place `certs/cert.pem` and `certs/key.pem` (e.g., from mkcert) in the project ro
 ## Architecture
 
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│  Tauri Shell (native window)                                     │
+│  └─ spawns Python sidecar → waits for ready → opens webview     │
+│     └─ kills sidecar on window close                             │
+└─────────────────────────────────────────────────────────────────┘
+              │ webview loads http://localhost:9876
+              ▼
 ┌─────────────────────┐     WebSocket      ┌──────────────────────┐
 │   Peer A (browser)  │◄──── signaling ────►│   Peer B (browser)   │
 │                     │     relay only      │                      │
@@ -38,7 +59,7 @@ Place `certs/cert.pem` and `certs/key.pem` (e.g., from mkcert) in the project ro
 │  └─ useFileTransfer │                     │  └─ useFileTransfer  │
 └─────────────────────┘                     └──────────────────────┘
               │                                        │
-              └────────── FastAPI backend ─────────────┘
+              └────────── FastAPI backend (sidecar) ───┘
                    /ws (signaling relay)
                    /api/info (LAN IP)
                    static files (prod)
@@ -57,12 +78,12 @@ Place `certs/cert.pem` and `certs/key.pem` (e.g., from mkcert) in the project ro
 
 ### Frontend hooks (`frontend/src/hooks/`)
 These are the core logic layer — most bugs and features involve these files:
-- `useSignaling.js` — WebSocket wrapper with message buffering (prevents race conditions when messages arrive before handler is registered)
-- `useWebRTC.js` — RTCPeerConnection lifecycle, media tracks, screen sharing, data channels. Uses the "polite peer" negotiation pattern (host=impolite, joiner=polite). All external state accessed via refs to avoid stale closures in callbacks.
-- `useDataChannel.js` — text messaging over the "chat" data channel
-- `useFileTransfer.js` — chunked binary file transfer (16KB chunks) over the "file" data channel with flow control via `bufferedAmountLowThreshold`
+- `useSignaling.ts` — WebSocket wrapper with message buffering (prevents race conditions when messages arrive before handler is registered)
+- `useWebRTC.ts` — RTCPeerConnection lifecycle, media tracks, screen sharing, data channels. Uses the "polite peer" negotiation pattern (host=impolite, joiner=polite). All external state accessed via refs to avoid stale closures in callbacks.
+- `useDataChannel.ts` — text messaging over the "chat" data channel
+- `useFileTransfer.ts` — chunked binary file transfer (16KB chunks) over the "file" data channel with flow control via `bufferedAmountLowThreshold`
 
-### Frontend state machine (`App.jsx`)
+### Frontend state machine (`App.tsx`)
 Screens: `home` → `lobby` → `session`. Session has three tabs: Chat, Call, Files. Transitions are driven by `webrtc.connectionState` changes.
 
 ## Key Patterns

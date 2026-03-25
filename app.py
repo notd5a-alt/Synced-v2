@@ -1,4 +1,8 @@
-"""GhostChat – zero-trust P2P desktop chat."""
+"""GhostChat – zero-trust P2P desktop chat.
+
+Development entry point. Starts the FastAPI backend server.
+For production, use Tauri which spawns backend/sidecar_entry.py as a sidecar.
+"""
 from __future__ import annotations
 
 import argparse
@@ -23,18 +27,16 @@ def _wait_for_server(url: str, timeout: float = 10.0):
 def main():
     parser = argparse.ArgumentParser(description="GhostChat")
     parser.add_argument("--port", type=int, default=9876)
-    parser.add_argument("--dev", action="store_true", help="Dev mode: skip pywebview")
+    parser.add_argument("--dev", action="store_true", help="Dev mode (default, kept for compat)")
     args = parser.parse_args()
 
-    # Tell the backend which port we're on
     import backend.main as backend_main
     backend_main.server_port = args.port
 
-    # Start uvicorn in a daemon thread
     server_thread = threading.Thread(
         target=uvicorn.run,
         args=("backend.main:app",),
-        kwargs={"host": "0.0.0.0", "port": args.port, "log_level": "warning"},
+        kwargs={"host": "0.0.0.0", "port": args.port, "log_level": "info"},
         daemon=True,
     )
     server_thread.start()
@@ -42,23 +44,13 @@ def main():
     local_url = f"http://localhost:{args.port}"
     _wait_for_server(local_url)
 
-    if args.dev:
-        print(f"GhostChat backend running at {local_url}")
-        print("Start the Vite dev server: cd frontend && npm run dev")
-        try:
-            server_thread.join()
-        except KeyboardInterrupt:
-            pass
-    else:
-        import webview
-        window = webview.create_window(
-            "GhostChat",
-            local_url,
-            width=960,
-            height=700,
-            min_size=(640, 480),
-        )
-        webview.start()
+    print(f"GhostChat backend running at {local_url}")
+    print("Start the Vite dev server: cd frontend && npm run dev")
+    print("Or use Tauri dev:          cargo tauri dev")
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

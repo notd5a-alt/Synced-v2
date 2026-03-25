@@ -45,12 +45,23 @@ async def ice_config():
             "username": turn_user,
             "credential": turn_cred,
         })
+    else:
+        # Free Open Relay TURN servers as fallback for symmetric NAT traversal
+        servers.append({
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443",
+            ],
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        })
     return {"iceServers": servers}
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await room.handle(ws)
+async def websocket_endpoint(ws: WebSocket, role: str = "host"):
+    await room.handle(ws, role)
 
 
 # Mount static files last (catch-all)

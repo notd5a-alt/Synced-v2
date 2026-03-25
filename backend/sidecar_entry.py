@@ -1,0 +1,27 @@
+"""Sidecar entry point for Tauri — starts FastAPI backend only."""
+from __future__ import annotations
+
+import argparse
+
+import uvicorn
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GhostChat backend sidecar")
+    parser.add_argument("--port", type=int, default=9876)
+    args = parser.parse_args()
+
+    import backend.main as backend_main
+
+    backend_main.server_port = args.port
+
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=args.port,
+        log_level="warning",
+    )
+
+
+if __name__ == "__main__":
+    main()

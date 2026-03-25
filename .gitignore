@@ -7,3 +7,9 @@ dist/
 .idea/
 *.egg-info/
 certs/
+storybook-static/
+src-tauri/target/
+src-tauri/binaries/
+build/
+.claude/
+windowsbuild.txt

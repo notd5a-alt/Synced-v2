@@ -1,10 +1,11 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import fs from 'fs'
-import path from 'path'
+/// <reference types="vitest/config" />
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import fs from 'fs';
+import path from 'path';
 
-const certsDir = path.resolve(__dirname, '../certs')
-const hasCerts = fs.existsSync(path.join(certsDir, 'cert.pem'))
+const certsDir = path.resolve(import.meta.dirname, '../certs');
+const hasCerts = fs.existsSync(path.join(certsDir, 'cert.pem'));
 
 export default defineConfig({
   plugins: [react()],
@@ -25,7 +26,6 @@ export default defineConfig({
         target: 'ws://localhost:9876',
         ws: true,
         secure: false,
-        // Suppress noisy errors when sockets close during disconnect
         configure: (proxy) => {
           proxy.on('error', () => {});
           proxy.on('proxyReqWs', (_proxyReq, _req, socket) => {
@@ -42,4 +42,10 @@ export default defineConfig({
       },
     },
   },
-})
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
+});

@@ -9,45 +9,60 @@ logger = logging.getLogger("ghostchat.signaling")
 
 MAX_MESSAGE_SIZE = 65536  # 64 KB
 ALLOWED_TYPES = {"offer", "answer", "ice-candidate"}
+VALID_ROLES = {"host", "join"}
 
 
 class SignalingRoom:
-    """Pairs exactly two WebSocket peers and relays messages between them."""
+    """Pairs exactly two WebSocket peers (host + join) and relays messages between them."""
 
     def __init__(self):
-        self._peers: list[WebSocket] = []
+        self._peers: dict[str, WebSocket] = {}  # role -> WebSocket
 
     @property
     def is_full(self) -> bool:
-        return len(self._peers) >= 2
+        return "host" in self._peers and "join" in self._peers
 
     def _other(self, ws: WebSocket) -> WebSocket | None:
-        for peer in self._peers:
+        for peer in self._peers.values():
             if peer is not ws:
                 return peer
         return None
 
-    async def connect(self, ws: WebSocket) -> bool:
-        """Add a peer. Returns False if room is full."""
-        if self.is_full:
+    async def connect(self, ws: WebSocket, role: str) -> bool:
+        """Add a peer by role. Duplicate role replaces the old connection."""
+        if role not in VALID_ROLES:
             return False
-        await ws.accept()
-        # Re-check after await to guard against concurrent coroutines
-        if self.is_full:
-            await ws.close(code=4000, reason="Room is full")
-            return False
-        self._peers.append(ws)
 
-        # Notify both sides when the second peer joins
-        if len(self._peers) == 2:
-            for peer in self._peers:
+        # If this role already has a connection, close the old one
+        if role in self._peers:
+            old = self._peers[role]
+            logger.info("replacing stale %s connection", role)
+            try:
+                await old.close(code=4001, reason="Replaced by new connection")
+            except Exception:
+                pass
+            del self._peers[role]
+
+        await ws.accept()
+        self._peers[role] = ws
+        logger.info("peer connected (%s, %d/2 in room)", role, len(self._peers))
+
+        # Notify both sides when both roles are filled
+        if self.is_full:
+            for peer in self._peers.values():
                 await peer.send_json({"type": "peer-joined"})
         return True
 
     async def disconnect(self, ws: WebSocket):
-        if ws in self._peers:
-            self._peers.remove(ws)
-            other = self._other(ws)
+        role_to_remove = None
+        for role, peer in self._peers.items():
+            if peer is ws:
+                role_to_remove = role
+                break
+        if role_to_remove:
+            del self._peers[role_to_remove]
+            logger.info("peer disconnected (%s, %d/2 in room)", role_to_remove, len(self._peers))
+            other = next(iter(self._peers.values()), None)
             if other:
                 try:
                     await other.send_json({"type": "peer-disconnected"})
@@ -82,11 +97,11 @@ class SignalingRoom:
             except Exception as e:
                 logger.warning("relay send failed: %s", e)
 
-    async def handle(self, ws: WebSocket):
+    async def handle(self, ws: WebSocket, role: str):
         """Full lifecycle: connect, relay messages, handle disconnect."""
-        accepted = await self.connect(ws)
+        accepted = await self.connect(ws, role)
         if not accepted:
-            await ws.close(code=4000, reason="Room is full")
+            await ws.close(code=4000, reason="Invalid role")
             return
         try:
             while True:

@@ -1,0 +1,45 @@
+{
+  "productName": "GhostChat",
+  "version": "0.1.0",
+  "identifier": "com.ghostchat.desktop",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devUrl": "http://localhost:9876",
+    "frontendDist": "../backend/static"
+  },
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "GhostChat",
+        "width": 960,
+        "height": 700,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/ghostchat-server"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "shell": {
+      "open": false
+    }
+  }
+}
