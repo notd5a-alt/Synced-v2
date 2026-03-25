@@ -66,15 +66,18 @@ jobs:
 
       - name: Build sidecar
         run: |
+          $root = $PWD.Path
           $triple = (rustc -vV | Select-String "host:").ToString().Split(" ")[1]
-          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
+          $distPath = Join-Path (Join-Path $root "src-tauri") "binaries"
+          $staticSrc = Join-Path (Join-Path $root "backend") "static"
+          New-Item -ItemType Directory -Force -Path $distPath | Out-Null
           pyinstaller `
             --onefile `
             --name ghostchat-server `
-            --add-data "backend\static;backend\static" `
-            --distpath src-tauri\binaries `
-            --workpath build\pyinstaller `
-            --specpath build `
+            --add-data "$staticSrc;backend\static" `
+            --distpath $distPath `
+            --workpath (Join-Path (Join-Path $root "build") "pyinstaller") `
+            --specpath (Join-Path $root "build") `
             --exclude-module numpy `
             --exclude-module PIL `
             --exclude-module Pillow `
@@ -88,8 +91,8 @@ jobs:
             --exclude-module rich `
             --exclude-module chardet `
             backend\sidecar_entry.py
-          $exe = Join-Path (Join-Path "src-tauri" "binaries") "ghostchat-server.exe"
-          $target = Join-Path (Join-Path "src-tauri" "binaries") "ghostchat-server-$triple.exe"
+          $exe = Join-Path $distPath "ghostchat-server.exe"
+          $target = Join-Path $distPath "ghostchat-server-$triple.exe"
           Move-Item -Force $exe $target
           Write-Host "Sidecar built: $target"
         shell: pwsh

@@ -29,7 +29,7 @@ New-Item -ItemType Directory -Force -Path $DistPath | Out-Null
 pyinstaller `
     --onefile `
     --name ghostchat-server `
-    --add-data "backend\static;backend\static" `
+    --add-data "$(Join-Path (Join-Path $ProjectRoot 'backend') 'static');backend\static" `
     --distpath $DistPath `
     --workpath (Join-Path (Join-Path $ProjectRoot "build") "pyinstaller") `
     --specpath (Join-Path $ProjectRoot "build") `
