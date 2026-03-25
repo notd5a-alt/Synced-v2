@@ -16,6 +16,56 @@ const DEFAULT_PORT: u16 = 9876;
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Kill any stale process listening on the target port before spawning the sidecar.
+/// This handles the scenario where a previous install's sidecar is still running.
+fn kill_stale_process_on_port(port: u16) {
+    #[cfg(windows)]
+    {
+        // Use netstat to find PID, then taskkill
+        let output = std::process::Command::new("cmd")
+            .args(["/C", &format!("netstat -ano | findstr \"LISTENING\" | findstr \":{port}\"")])
+            .output();
+        if let Ok(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                // Netstat lines end with the PID
+                if let Some(pid_str) = line.split_whitespace().last() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid != std::process::id() {
+                            eprintln!("[tauri] killing stale process {} on port {}", pid, port);
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/F", "/PID", &pid.to_string()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        // Use lsof to find PID, then kill
+        let output = std::process::Command::new("lsof")
+            .args(["-ti", &format!("tcp:{port}")])
+            .output();
+        if let Ok(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for pid_str in text.split_whitespace() {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    if pid != std::process::id() {
+                        eprintln!("[tauri] killing stale process {} on port {}", pid, port);
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &pid.to_string()])
+                            .output();
+                    }
+                }
+            }
+        }
+    }
+    // Small delay to let the OS reclaim the port
+    std::thread::sleep(Duration::from_millis(500));
+}
+
 /// In dev mode (no custom-protocol feature), the user runs the Python backend
 /// manually via `python app.py --dev`. In production, we spawn it as a sidecar.
 fn is_production() -> bool {
@@ -131,6 +181,9 @@ fn main() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             if is_production() {
+                // Kill any stale sidecar from a previous install still holding the port
+                kill_stale_process_on_port(port);
+
                 // Production: spawn the Python sidecar (FastAPI backend)
                 let sidecar_cmd = app
                     .shell()
