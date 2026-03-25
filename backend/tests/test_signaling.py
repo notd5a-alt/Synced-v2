@@ -148,7 +148,13 @@ class TestSignalingWebSocket:
                 ws2.receive_json()
 
             # ws2 context exits (disconnects)
-            msg = ws1.receive_json()
+            # Skip heartbeat pings (respond with pong to prevent timeout)
+            for _ in range(10):
+                msg = ws1.receive_json()
+                if msg["type"] == "ping":
+                    ws1.send_json({"type": "pong"})
+                    continue
+                break
             assert msg["type"] == "peer-disconnected"
 
     def test_token_protection(self):

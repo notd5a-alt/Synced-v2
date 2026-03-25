@@ -37,10 +37,96 @@ fn parse_port() -> u16 {
     DEFAULT_PORT
 }
 
+/// Kill the sidecar process if it's still running.
+fn kill_sidecar(state: &SidecarState) {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(child) = guard.take() {
+            let _ = child.kill();
+            eprintln!("[tauri] sidecar killed");
+        }
+    }
+}
+
+// --- Windows Job Object: auto-kill sidecar when Tauri process exits ---
+
+#[cfg(windows)]
+mod job_object {
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// RAII wrapper for a Win32 HANDLE — closes on drop.
+    struct SafeHandle(HANDLE);
+    unsafe impl Send for SafeHandle {}
+    unsafe impl Sync for SafeHandle {}
+    impl Drop for SafeHandle {
+        fn drop(&mut self) {
+            if self.0 != 0 && self.0 != INVALID_HANDLE_VALUE {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+
+    /// Stored via `app.manage()` to keep the Job Object alive for the app's lifetime.
+    pub struct JobObjectState(pub Mutex<Option<SafeHandle>>);
+
+    /// Assign a child process to a Job Object with KILL_ON_JOB_CLOSE.
+    /// When the Tauri process exits (even via crash), Windows kills all processes in the job.
+    pub fn assign_child_to_job(child_pid: u32) -> Option<JobObjectState> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job == 0 || job == INVALID_HANDLE_VALUE {
+                eprintln!("[tauri] failed to create job object");
+                return None;
+            }
+
+            // Configure: kill all processes in job when last handle closes
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set_ok == 0 {
+                eprintln!("[tauri] failed to set job object info");
+                CloseHandle(job);
+                return None;
+            }
+
+            // Open child process and assign to job
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+            let child_handle = OpenProcess(PROCESS_ALL_ACCESS, 0, child_pid);
+            if child_handle == 0 || child_handle == INVALID_HANDLE_VALUE {
+                eprintln!("[tauri] failed to open child process {}", child_pid);
+                CloseHandle(job);
+                return None;
+            }
+
+            let assign_ok = AssignProcessToJobObject(job, child_handle);
+            CloseHandle(child_handle);
+
+            if assign_ok == 0 {
+                eprintln!("[tauri] failed to assign process to job object");
+                CloseHandle(job);
+                return None;
+            }
+
+            eprintln!("[tauri] child pid {} assigned to job object (KILL_ON_JOB_CLOSE)", child_pid);
+            Some(JobObjectState(Mutex::new(Some(SafeHandle(job)))))
+        }
+    }
+}
+
 fn main() {
     let port = parse_port();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -56,7 +142,17 @@ fn main() {
                     .spawn()
                     .expect("failed to spawn synced-server sidecar");
 
-                // Store child handle for cleanup
+                // On Windows, assign sidecar to a Job Object so it's auto-killed
+                // if the Tauri process exits (even via crash or Task Manager kill)
+                #[cfg(windows)]
+                {
+                    let pid = child.pid();
+                    if let Some(job_state) = job_object::assign_child_to_job(pid) {
+                        app.manage(job_state);
+                    }
+                }
+
+                // Store child handle for explicit cleanup
                 app.manage(SidecarState(Mutex::new(Some(child))));
 
                 // Log sidecar output in background
@@ -118,18 +214,23 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Redundant early cleanup — also kills sidecar on window destroy
             if let tauri::WindowEvent::Destroyed = event {
-                // Kill sidecar when the window is destroyed (no-op in dev mode)
                 if let Some(state) = window.try_state::<SidecarState>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(child) = guard.take() {
-                            let _ = child.kill();
-                            eprintln!("[tauri] sidecar killed on window close");
-                        }
-                    }
+                    kill_sidecar(&state);
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // RunEvent::Exit is the canonical app-level exit hook in Tauri v2.
+    // It fires regardless of how the app was closed (Alt+F4, taskbar, system shutdown, etc.)
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(state) = app_handle.try_state::<SidecarState>() {
+                kill_sidecar(&state);
+            }
+        }
+    });
 }
