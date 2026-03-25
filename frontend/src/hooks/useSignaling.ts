@@ -8,6 +8,7 @@ export default function useSignaling(url: string | null): SignalingHook {
   const wsRef = useRef<WebSocket | null>(null);
   const onMessageRef = useRef<((msg: SignalingMessage) => void) | null>(null);
   const queueRef = useRef<SignalingMessage[]>([]); // buffer messages arriving before handler is set
+  const sendQueueRef = useRef<SignalingMessage[]>([]); // buffer outgoing messages during reconnect
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const intentionalCloseRef = useRef(false);
@@ -41,6 +42,16 @@ export default function useSignaling(url: string | null): SignalingHook {
       setState("open");
       wasEverOpenRef.current = true;
       reconnectAttemptRef.current = 0;
+
+      // Flush queued outgoing messages (ICE candidates, etc. sent during reconnect)
+      const queued = sendQueueRef.current;
+      sendQueueRef.current = [];
+      for (const msg of queued) {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          addLog(`WS flush: ${msg.type}`);
+          wsRef.current.send(JSON.stringify(msg));
+        }
+      }
     };
     ws.onclose = (event: CloseEvent) => {
       // Connection state logged via addLog to debug panel
@@ -51,16 +62,19 @@ export default function useSignaling(url: string | null): SignalingHook {
       // connection for the same role (backend sends 4001 on replacement)
       if (intentionalCloseRef.current || event.code === 4001) {
         setState("closed");
+        sendQueueRef.current = [];
         return;
       }
 
       // Only auto-reconnect if the connection was previously open
       // (prevents phantom reconnects from failed initial connections)
       if (wasEverOpenRef.current && reconnectAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
-        const delay = Math.min(
+        const baseDelay = Math.min(
           BASE_DELAY * Math.pow(2, reconnectAttemptRef.current),
           30000
         );
+        // Add ±20% jitter to prevent thundering herd on server restart
+        const delay = Math.max(500, baseDelay * (0.8 + Math.random() * 0.4));
         setState("reconnecting");
         reconnectTimerRef.current = setTimeout(() => {
           reconnectAttemptRef.current++;
@@ -68,8 +82,11 @@ export default function useSignaling(url: string | null): SignalingHook {
         }, delay);
       } else if (!wasEverOpenRef.current) {
         setState("closed");
+        sendQueueRef.current = [];
       } else {
+        // Max reconnect attempts exhausted — clear stale queued messages
         setState("closed");
+        sendQueueRef.current = [];
       }
     };
     ws.onerror = () => {
@@ -102,7 +119,9 @@ export default function useSignaling(url: string | null): SignalingHook {
       addLog(`WS send: ${obj.type}`);
       ws.send(JSON.stringify(obj));
     } else {
-      addLog(`WS send FAIL (not open): ${obj.type}`);
+      // Queue for retry on reconnect instead of dropping
+      sendQueueRef.current.push(obj);
+      addLog(`WS send QUEUED (not open): ${obj.type}`);
     }
   }, [addLog]);
 
@@ -115,6 +134,7 @@ export default function useSignaling(url: string | null): SignalingHook {
     wsRef.current?.close();
     wsRef.current = null;
     queueRef.current = [];
+    sendQueueRef.current = [];
     setState("closed");
   }, []);
 

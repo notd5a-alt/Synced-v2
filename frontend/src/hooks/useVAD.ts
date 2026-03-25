@@ -27,10 +27,16 @@ export default function useVAD(
         return;
     }
 
+    // Close previous context before creating new one to prevent AudioContext exhaustion
+    if (localCtxRef.current && localCtxRef.current.state !== "closed") {
+      localCtxRef.current.close().catch(() => {});
+    }
+
     let ctx: AudioContext;
     try {
         ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     } catch { return; }
+    localCtxRef.current = ctx;
 
     const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
     const analyser = ctx.createAnalyser();
@@ -72,10 +78,16 @@ export default function useVAD(
         return;
     }
 
+    // Close previous context before creating new one to prevent AudioContext exhaustion
+    if (remoteCtxRef.current && remoteCtxRef.current.state !== "closed") {
+      remoteCtxRef.current.close().catch(() => {});
+    }
+
     let ctx: AudioContext;
     try {
         ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     } catch { return; }
+    remoteCtxRef.current = ctx;
 
     const source = ctx.createMediaStreamSource(new MediaStream([audioTrack]));
     const analyser = ctx.createAnalyser();

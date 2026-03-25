@@ -277,9 +277,9 @@ describe("useSignaling", () => {
 
     expect(result.current.state).toBe("reconnecting");
 
-    // First reconnect after BASE_DELAY (1000ms)
+    // First reconnect after BASE_DELAY (~1000ms ±20% jitter, max 1200ms)
     act(() => {
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(1200);
     });
 
     const secondWs = MockWebSocket.lastInstance!;
@@ -294,16 +294,9 @@ describe("useSignaling", () => {
 
     expect(result.current.state).toBe("reconnecting");
 
-    // Second reconnect after 2000ms (exponential backoff)
+    // Second reconnect after ~2000ms (exponential backoff ±20% jitter, max 2400ms)
     act(() => {
-      vi.advanceTimersByTime(1999);
-    });
-    // Should not have reconnected yet
-    const stillSecond = MockWebSocket.lastInstance!;
-    expect(stillSecond).toBe(secondWs);
-
-    act(() => {
-      vi.advanceTimersByTime(1);
+      vi.advanceTimersByTime(2400);
     });
     // Now it should have created a third WS
     expect(MockWebSocket.lastInstance).not.toBe(secondWs);

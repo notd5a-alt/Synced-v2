@@ -51,7 +51,12 @@ export default function useDataChannel(
 
   useEffect(() => {
     channelRef.current = channel;
-    if (!channel) return;
+    if (!channel) {
+      // Reset typing indicator when channel closes to prevent stuck state
+      setPeerTyping(false);
+      if (peerTypingTimeoutRef.current) clearTimeout(peerTypingTimeoutRef.current);
+      return;
+    }
 
     const handler = async (e: MessageEvent) => {
       try {

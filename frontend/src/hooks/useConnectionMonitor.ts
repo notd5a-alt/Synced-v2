@@ -47,6 +47,9 @@ export default function useConnectionMonitor(
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevBytesRef = useRef(0);
   const prevTimestampRef = useRef(0);
+  const smoothBitrateRef = useRef(0);
+  const qualityCountRef = useRef(0); // consecutive samples at candidate quality
+  const candidateQualityRef = useRef<ConnectionQuality | null>(null);
   const signalingStateRef = useRef(signalingState);
   signalingStateRef.current = signalingState;
 
@@ -76,7 +79,13 @@ export default function useConnectionMonitor(
 
     restartAttemptsRef.current++;
     setIsRecovering(true);
-    pc.restartIce(); // triggers onnegotiationneeded → new offer with ice-restart
+    try {
+      pc.restartIce(); // triggers onnegotiationneeded → new offer with ice-restart
+    } catch {
+      // restartIce can fail if connection is already closed
+      setIsRecovering(false);
+      setRecoveryFailed(true);
+    }
   }, [pcRef]);
 
   // React to connection state changes
@@ -110,6 +119,9 @@ export default function useConnectionMonitor(
       setRecoveryFailed(false);
       prevBytesRef.current = 0;
       prevTimestampRef.current = 0;
+      smoothBitrateRef.current = 0;
+      qualityCountRef.current = 0;
+      candidateQualityRef.current = null;
     }
   }, [connectionState, attemptRestart, clearTimers]);
 
@@ -217,19 +229,43 @@ export default function useConnectionMonitor(
         const lossPercent = totalPackets > 0 ? (packetsLost / totalPackets) * 100 : 0;
 
         const now = performance.now();
-        const bitrate = prevTimestampRef.current > 0
+        const instantBitrate = prevTimestampRef.current > 0
           ? ((bytesReceived - prevBytesRef.current) * 8) / ((now - prevTimestampRef.current) / 1000)
           : 0;
         prevBytesRef.current = bytesReceived;
         prevTimestampRef.current = now;
 
+        // EWMA smoothing (α=0.3) to reduce jitter in bitrate readings
+        const alpha = 0.3;
+        smoothBitrateRef.current = smoothBitrateRef.current === 0
+          ? instantBitrate
+          : alpha * instantBitrate + (1 - alpha) * smoothBitrateRef.current;
+        const bitrate = smoothBitrateRef.current;
+
         setStats({ rtt, packetLoss: lossPercent, bitrate, codec, resolution, fps });
 
+        // Quality classification with hysteresis — require 2 consecutive samples
+        // at a new level before switching, to prevent oscillation at boundaries
         if (rtt != null) {
-          if (rtt < 100 && lossPercent < 0.5) setConnectionQuality("excellent");
-          else if (rtt < 250 && lossPercent < 2) setConnectionQuality("good");
-          else if (rtt < 500 && lossPercent < 5) setConnectionQuality("poor");
-          else setConnectionQuality("critical");
+          let rawQuality: ConnectionQuality;
+          if (rtt < 100 && lossPercent < 0.5) rawQuality = "excellent";
+          else if (rtt < 250 && lossPercent < 2) rawQuality = "good";
+          else if (rtt < 500 && lossPercent < 5) rawQuality = "poor";
+          else rawQuality = "critical";
+
+          if (rawQuality === candidateQualityRef.current) {
+            qualityCountRef.current++;
+          } else {
+            candidateQualityRef.current = rawQuality;
+            qualityCountRef.current = 1;
+          }
+
+          // Apply immediately on first reading or after 2 consecutive samples
+          if (connectionQuality === null || qualityCountRef.current >= 2) {
+            if (rawQuality !== connectionQuality) {
+              setConnectionQuality(rawQuality);
+            }
+          }
         }
       } catch {
         // Stats not available
@@ -246,6 +282,9 @@ export default function useConnectionMonitor(
   }, [connectionState, pcRef]);
 
   // Bandwidth adaptation — adjust video encoding when quality changes
+  // Also re-applies when stats update (every 3s) to catch newly-added video senders
+  const applyingParamsRef = useRef(false);
+  const lastTierRef = useRef<BandwidthTier | null>(null);
   useEffect(() => {
     if (!connectionQuality) return;
     const pc = pcRef.current;
@@ -253,19 +292,35 @@ export default function useConnectionMonitor(
 
     const tier = BANDWIDTH_TIERS[connectionQuality];
     if (!tier) return;
+    lastTierRef.current = tier;
 
-    pc.getSenders().forEach(async (sender) => {
-      if (sender.track?.kind !== "video") return;
-      const params = sender.getParameters();
-      if (!params.encodings || params.encodings.length === 0) return;
-      params.encodings[0].maxBitrate = tier.maxBitrate;
-      params.encodings[0].scaleResolutionDownBy = tier.scaleDown;
-      params.encodings[0].maxFramerate = tier.maxFramerate;
+    // Skip if a previous update is still in flight to prevent concurrent setParameters()
+    if (applyingParamsRef.current) return;
+
+    const applyParams = async () => {
+      applyingParamsRef.current = true;
       try {
-        await sender.setParameters(params);
-      } catch { /* encoding params not supported */ }
-    });
-  }, [connectionQuality, pcRef]);
+        const senders = pc.getSenders();
+        for (const sender of senders) {
+          if (sender.track?.kind !== "video") continue;
+          const params = sender.getParameters();
+          if (!params.encodings || params.encodings.length === 0) continue;
+          // Skip if already at correct bitrate (avoids redundant setParameters calls)
+          if (params.encodings[0].maxBitrate === tier.maxBitrate) continue;
+          params.encodings[0].maxBitrate = tier.maxBitrate;
+          params.encodings[0].scaleResolutionDownBy = tier.scaleDown;
+          params.encodings[0].maxFramerate = tier.maxFramerate;
+          try {
+            await sender.setParameters(params);
+          } catch { /* encoding params not supported */ }
+        }
+      } finally {
+        applyingParamsRef.current = false;
+      }
+    };
+
+    applyParams();
+  }, [connectionQuality, stats, pcRef]);
 
   // Cleanup on unmount
   useEffect(() => {

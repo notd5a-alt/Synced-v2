@@ -74,15 +74,6 @@ export function preferAudioCodecs(pc: RTCPeerConnection): void {
 export function optimizeOpusInSDP(sdp: string): string {
   if (!sdp) return sdp;
 
-  // Find the Opus payload type
-  const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
-  if (!opusMatch) return sdp;
-  const pt = opusMatch[1];
-
-  // Check if fmtp line already exists for Opus
-  const fmtpRegex = new RegExp(`a=fmtp:${pt} (.+)`);
-  const fmtpMatch = sdp.match(fmtpRegex);
-
   const opusParams: Record<string, number> = {
     usedtx: 1, // Discontinuous transmission — saves bandwidth during silence
     useinbandfec: 1, // Forward error correction — resilience to packet loss
@@ -91,28 +82,39 @@ export function optimizeOpusInSDP(sdp: string): string {
     "sprop-stereo": 0,
   };
 
-  if (fmtpMatch) {
-    // Parse existing params and merge
-    const existing: Record<string, string> = {};
-    fmtpMatch[1].split(";").forEach((p) => {
-      const [k, v] = p.trim().split("=");
-      if (k) existing[k] = v;
-    });
-    const merged = { ...existing, ...opusParams };
-    const paramStr = Object.entries(merged)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(";");
-    sdp = sdp.replace(fmtpRegex, `a=fmtp:${pt} ${paramStr}`);
-  } else {
-    // Add fmtp line after rtpmap
-    const paramStr = Object.entries(opusParams)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(";");
-    sdp = sdp.replace(
-      `a=rtpmap:${pt} opus/48000`,
-      `a=rtpmap:${pt} opus/48000\r\na=fmtp:${pt} ${paramStr}`
-    );
+  // Find ALL Opus payload types (multi-stream SDPs may have more than one)
+  const opusMatches = [...sdp.matchAll(/a=rtpmap:(\d+) opus\/48000/g)];
+  if (opusMatches.length === 0) return sdp;
+
+  let result = sdp;
+  for (const match of opusMatches) {
+    const pt = match[1];
+    const fmtpRegex = new RegExp(`a=fmtp:${pt} (.+)`);
+    const fmtpMatch = result.match(fmtpRegex);
+
+    if (fmtpMatch) {
+      // Parse existing params and merge
+      const existing: Record<string, string> = {};
+      fmtpMatch[1].split(";").forEach((p) => {
+        const [k, v] = p.trim().split("=");
+        if (k) existing[k] = v;
+      });
+      const merged = { ...existing, ...opusParams };
+      const paramStr = Object.entries(merged)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(";");
+      result = result.replace(fmtpRegex, `a=fmtp:${pt} ${paramStr}`);
+    } else {
+      // Add fmtp line after rtpmap
+      const paramStr = Object.entries(opusParams)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(";");
+      result = result.replace(
+        `a=rtpmap:${pt} opus/48000`,
+        `a=rtpmap:${pt} opus/48000\r\na=fmtp:${pt} ${paramStr}`
+      );
+    }
   }
 
-  return sdp;
+  return result;
 }

@@ -21,28 +21,34 @@ class TestSignalingRoom:
     def test_validate_rejects_oversized(self):
         room = SignalingRoom("test")
         huge = json.dumps({"type": "offer", "data": "x" * 70000})
-        assert room._validate(huge) is False
+        assert room._validate(huge) is None
 
     def test_validate_rejects_invalid_json(self):
         room = SignalingRoom("test")
-        assert room._validate("not json{{{") is False
+        assert room._validate("not json{{{") is None
 
     def test_validate_rejects_unknown_type(self):
         room = SignalingRoom("test")
-        assert room._validate(json.dumps({"type": "hack"})) is False
+        assert room._validate(json.dumps({"type": "hack"})) is None
 
     def test_validate_accepts_offer(self):
         room = SignalingRoom("test")
-        assert room._validate(json.dumps({"type": "offer", "sdp": "v=0..."})) is True
+        result = room._validate(json.dumps({"type": "offer", "sdp": "v=0..."}))
+        assert result is not None
+        assert result["type"] == "offer"
 
     def test_validate_accepts_answer(self):
         room = SignalingRoom("test")
-        assert room._validate(json.dumps({"type": "answer", "sdp": "v=0..."})) is True
+        result = room._validate(json.dumps({"type": "answer", "sdp": "v=0..."}))
+        assert result is not None
+        assert result["type"] == "answer"
 
     def test_validate_accepts_ice_candidate(self):
         room = SignalingRoom("test")
         msg = json.dumps({"type": "ice-candidate", "candidate": "a=candidate:..."})
-        assert room._validate(msg) is True
+        result = room._validate(msg)
+        assert result is not None
+        assert result["type"] == "ice-candidate"
 
 
 class TestTokenBucket:

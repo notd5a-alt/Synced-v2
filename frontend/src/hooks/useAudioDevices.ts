@@ -12,6 +12,7 @@ export interface AudioDevicesHook {
   selectedOutput: string;
   setInputDevice: (deviceId: string) => Promise<void>;
   setOutputDevice: (deviceId: string) => void;
+  deviceError: string | null;
 }
 
 /**
@@ -31,6 +32,7 @@ export default function useAudioDevices(
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   const [selectedInput, setSelectedInput] = useState<string>("");
   const [selectedOutput, setSelectedOutput] = useState<string>("");
+  const [deviceError, setDeviceError] = useState<string | null>(null);
   const selectedInputRef = useRef(selectedInput);
   selectedInputRef.current = selectedInput;
 
@@ -82,6 +84,7 @@ export default function useAudioDevices(
 
     // Get current audio processing state from old track
     const settings = oldTrack.getSettings();
+    setDeviceError(null);
 
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
@@ -111,6 +114,7 @@ export default function useAudioDevices(
       setSelectedInput(deviceId);
     } catch (err) {
       console.error("Failed to switch input device:", err);
+      setDeviceError((err as Error).message || "Failed to switch microphone");
     }
   }, [pcRef, localStreamRef, setLocalStream]);
 
@@ -131,5 +135,6 @@ export default function useAudioDevices(
     selectedOutput,
     setInputDevice,
     setOutputDevice,
+    deviceError,
   };
 }

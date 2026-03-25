@@ -64,7 +64,7 @@ export default function useFileTransfer(
   const sendLockRef = useRef(false);
   const channelRef = useRef(channel);
   const hmacKeyRef = useRef(hmacKey);
-  const blobUrlsRef = useRef<string[]>([]);
+  const blobUrlsRef = useRef<Map<string, string>>(new Map());
   const activeSendRef = useRef<ActiveSend | null>(null);
   const sendResolveRef = useRef<(() => void) | null>(null);
 
@@ -92,14 +92,20 @@ export default function useFileTransfer(
         return; // Will resume via file-resume-req
       }
 
-      // Flow control
+      // Flow control — set threshold BEFORE registering handler to prevent race
+      // where bufferedAmount drops below threshold before handler is attached
       if (ch.bufferedAmount > 65536) {
+        ch.bufferedAmountLowThreshold = 16384;
         await new Promise<void>((resolve) => {
-          ch.bufferedAmountLowThreshold = 16384;
-          ch.onbufferedamountlow = () => {
+          const handler = () => {
             ch.onbufferedamountlow = null;
             resolve();
           };
+          ch.onbufferedamountlow = handler;
+          // Check immediately in case buffer already drained
+          if (ch.bufferedAmount <= 16384) {
+            handler();
+          }
         });
       }
 
@@ -154,13 +160,19 @@ export default function useFileTransfer(
 
     if (pausedIds.length > 0) {
       const key = hmacKeyRef.current;
-      for (const { id, receivedBytes, chunkIndex } of pausedIds) {
-        const msg = JSON.stringify({ type: "file-resume-req", id, receivedBytes, chunkIndex });
-        const send = async () => {
-          channel.send(key ? await signMessage(key, msg) : msg);
-        };
-        send().catch(() => {});
-      }
+      const sendResumes = async () => {
+        for (const { id, receivedBytes, chunkIndex } of pausedIds) {
+          if (channel.readyState !== "open") break;
+          const msg = JSON.stringify({ type: "file-resume-req", id, receivedBytes, chunkIndex });
+          try {
+            const signed = key ? await signMessage(key, msg) : msg;
+            channel.send(signed);
+          } catch (err) {
+            console.warn("Failed to send resume request for", id, err);
+          }
+        }
+      };
+      sendResumes();
     }
 
     const handler = async (e: MessageEvent) => {
@@ -240,7 +252,7 @@ export default function useFileTransfer(
               const blobUrl = URL.createObjectURL(
                 new Blob([finalBlob], { type: entry.mimeType })
               );
-              blobUrlsRef.current.push(blobUrl);
+              blobUrlsRef.current.set(id, blobUrl);
               delete pendingRef.current[id];
               setIncoming((prev) =>
                 prev.map((f) =>
@@ -388,7 +400,7 @@ export default function useFileTransfer(
   useEffect(() => {
     return () => {
       blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      blobUrlsRef.current = [];
+      blobUrlsRef.current = new Map();
     };
   }, []);
 
@@ -512,7 +524,7 @@ export default function useFileTransfer(
         if (f.id === id) {
           if (f.blobUrl) {
             URL.revokeObjectURL(f.blobUrl);
-            blobUrlsRef.current = blobUrlsRef.current.filter((u) => u !== f.blobUrl);
+            blobUrlsRef.current.delete(id);
           }
           return { ...f, status: "failed" as FileTransferStatus, error: "Cancelled" };
         }

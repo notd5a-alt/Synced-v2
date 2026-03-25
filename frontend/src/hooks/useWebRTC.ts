@@ -59,6 +59,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
   const [hmacKey, setHmacKey] = useState<CryptoKey | null>(null);
+  const hmacDerivedRef = useRef(false);
   const [audioProcessing, setAudioProcessing] = useState<AudioProcessingState>({
     noiseSuppression: true,
     echoCancellation: true,
@@ -119,6 +120,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     setRemoteStream(remoteStreamRef.current);
     setCallError(null);
     setHmacKey(null);
+    hmacDerivedRef.current = false;
     setAudioProcessing({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
     setConnectionState("new");
     // Bump counter so the init effect in App.tsx re-fires even when
@@ -157,17 +159,20 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     pc.onconnectionstatechange = () => {
       log(`RTC connectionState: ${pc.connectionState}`);
       setConnectionState(pc.connectionState);
-      if (pc.connectionState === "connected" && pc.localDescription && pc.remoteDescription) {
+      if (pc.connectionState === "connected" && !hmacDerivedRef.current
+          && pc.localDescription && pc.remoteDescription) {
+        hmacDerivedRef.current = true;
         deriveHmacKey(pc.localDescription.sdp, pc.remoteDescription.sdp)
           .then((key) => { if (key) setHmacKey(key); })
           .catch(() => {});
       }
     };
 
-    // Remote media tracks — add to stable stream
+    // Remote media tracks — reuse stable stream ref, only create new MediaStream
+    // on actual track add/remove (not mute/unmute which is track-level state)
     const remote = remoteStreamRef.current;
     pc.ontrack = (e) => {
-      if (!e.track.muted) {
+      if (!remote.getTracks().includes(e.track)) {
         remote.addTrack(e.track);
         setRemoteStream(new MediaStream(remote.getTracks()));
       }
@@ -178,18 +183,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           setRemoteStream(new MediaStream(remote.getTracks()));
         }
       };
-      e.track.onmute = () => {
-        if (remote.getTracks().includes(e.track)) {
-          remote.removeTrack(e.track);
-          setRemoteStream(new MediaStream(remote.getTracks()));
-        }
-      };
-      e.track.onunmute = () => {
-        if (!remote.getTracks().includes(e.track)) {
-          remote.addTrack(e.track);
-          setRemoteStream(new MediaStream(remote.getTracks()));
-        }
-      };
+      // mute/unmute are track-level state changes — no need to recreate the stream
     };
 
     if (host) {
@@ -205,19 +199,18 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     // Serialized offer creation — prevents duplicate/racing offers
     let peerPresent = false;
     // Track what was negotiated to prevent infinite renegotiation loops.
-    // The browser fires onnegotiationneeded when data channels are created,
-    // but if we suppress it (peerPresent=false) and later negotiate manually
-    // via peer-joined, the browser may re-fire onnegotiationneeded after the
-    // answer is set (state returns to "stable"), causing an infinite loop.
+    // Only count senders (local tracks we control) — receivers and sctp.maxChannels
+    // change asynchronously after negotiation completes, which would cause the
+    // fingerprint to differ on the next onnegotiationneeded and trigger a loop.
     let lastNegotiatedFingerprint = "";
+    let lastNegotiationTime = 0;
+    const MIN_NEGOTIATION_INTERVAL = 2000; // ms — prevent rapid renegotiation
 
     const getNegotiationFingerprint = (): string => {
       const pc = pcRef.current;
       if (!pc) return "";
       const senders = pc.getSenders().filter((s) => s.track).length;
-      const receivers = pc.getReceivers().filter((r) => r.track?.readyState === "live").length;
-      const channels = (pc as unknown as { sctp?: { maxChannels?: number } }).sctp?.maxChannels ?? "pending";
-      return `s${senders}:r${receivers}:dc${channels}`;
+      return `s${senders}`;
     };
 
     const enqueueNegotiation = () => {
@@ -254,10 +247,20 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     // changed (tracks/channels) since the last negotiation.
     pc.onnegotiationneeded = () => {
       const fp = getNegotiationFingerprint();
-      log(`RTC onnegotiationneeded fp=${fp} last=${lastNegotiatedFingerprint} peer=${peerPresent}`);
+      const now = Date.now();
+      const elapsed = now - lastNegotiationTime;
+      log(`RTC onnegotiationneeded fp=${fp} last=${lastNegotiatedFingerprint} peer=${peerPresent} elapsed=${elapsed}ms`);
       if (peerPresent && fp !== lastNegotiatedFingerprint) {
         lastNegotiatedFingerprint = fp;
-        enqueueNegotiation();
+        // Enforce minimum interval to prevent renegotiation storms
+        if (elapsed < MIN_NEGOTIATION_INTERVAL) {
+          const delay = MIN_NEGOTIATION_INTERVAL - elapsed;
+          log(`RTC negotiate delayed ${delay}ms (cooldown)`);
+          setTimeout(() => enqueueNegotiation(), delay);
+        } else {
+          enqueueNegotiation();
+        }
+        lastNegotiationTime = now;
       }
     };
 
@@ -273,10 +276,9 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
             makingOfferRef.current || pc.signalingState !== "stable";
           if (collision && host) return;
           if (collision) {
-            await Promise.all([
-              pc.setLocalDescription({ type: "rollback" }),
-              pc.setRemoteDescription({ type: "offer", sdp: msg.sdp }),
-            ]);
+            // Rollback must complete before accepting the new offer (spec requirement)
+            await pc.setLocalDescription({ type: "rollback" });
+            await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
           } else {
             await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
           }
@@ -307,6 +309,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
             // Mark the current state as the fingerprint so onnegotiationneeded
             // doesn't re-trigger for the same data channels we're about to negotiate
             lastNegotiatedFingerprint = getNegotiationFingerprint();
+            lastNegotiationTime = Date.now();
             log(`RTC calling enqueueNegotiation (fp=${lastNegotiatedFingerprint})`);
             enqueueNegotiation();
           } else {
@@ -478,20 +481,26 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
 
       // Add system audio track if the user chose to share it
+      // Clean up any previous screen audio sender first to prevent duplicates
+      if (screenAudioSenderRef.current) {
+        try { pc.removeTrack(screenAudioSenderRef.current); } catch { /* already removed */ }
+        screenAudioSenderRef.current = null;
+      }
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
         screenAudioSenderRef.current = pc.addTrack(audioTrack, stream);
       }
 
-      // State update after all track operations are complete
-      setScreenStream(stream);
-
-      // When user stops sharing via browser's built-in "Stop sharing" button
+      // Register onended BEFORE state update to prevent race with browser's
+      // built-in "Stop sharing" button firing before handler is attached
       screenTrack.onended = () => {
         stopScreenShare().catch((err: unknown) =>
           console.error("stopScreenShare from onended failed:", err)
         );
       };
+
+      // State update after all track operations are complete
+      setScreenStream(stream);
     } catch (err) {
       const e = err as DOMException;
       if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
@@ -544,12 +553,14 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
   const toggleAudioProcessing = useCallback(async (key: keyof AudioProcessingState) => {
     const track = localStreamRef.current?.getAudioTracks()[0];
     if (!track) return;
-    setAudioProcessing((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      track.applyConstraints({ [key]: next[key] }).catch(() => {});
-      return next;
-    });
-  }, []);
+    const nextVal = !audioProcessing[key];
+    try {
+      await track.applyConstraints({ [key]: nextVal });
+      setAudioProcessing((prev) => ({ ...prev, [key]: nextVal }));
+    } catch {
+      // Constraint not supported by this browser/device — don't update state
+    }
+  }, [audioProcessing]);
 
   const getFingerprint = useCallback((): string | null => {
     const sdp = pcRef.current?.localDescription?.sdp;

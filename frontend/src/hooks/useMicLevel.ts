@@ -20,6 +20,11 @@ export default function useMicLevel(stream: MediaStream | null): number {
       return;
     }
 
+    // Close previous AudioContext before creating new one to prevent exhaustion
+    if (ctxRef.current && ctxRef.current.state !== "closed") {
+      ctxRef.current.close().catch(() => {});
+    }
+
     let ctx: AudioContext;
     try {
       ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
