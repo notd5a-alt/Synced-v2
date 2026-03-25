@@ -4,7 +4,12 @@
 
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+# Resolve project root (parent of scripts/)
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$ProjectRoot = Split-Path -Parent $ScriptDir
+
+Write-Host "Project root: $ProjectRoot"
+Set-Location $ProjectRoot
 
 # Get the Rust target triple
 $RustcOutput = rustc -vV
@@ -16,14 +21,18 @@ if (-not $Triple) {
 
 Write-Host "Building sidecar for target: $Triple"
 
-Set-Location $ProjectRoot
+# Ensure output directory exists
+$DistPath = Join-Path $ProjectRoot "src-tauri" "binaries"
+New-Item -ItemType Directory -Force -Path $DistPath | Out-Null
+
+# Build with PyInstaller
 pyinstaller `
     --onefile `
     --name ghostchat-server `
-    --add-data "backend/static;backend/static" `
-    --distpath src-tauri/binaries `
-    --workpath build/pyinstaller `
-    --specpath build `
+    --add-data "backend\static;backend\static" `
+    --distpath $DistPath `
+    --workpath (Join-Path $ProjectRoot "build" "pyinstaller") `
+    --specpath (Join-Path $ProjectRoot "build") `
     --exclude-module numpy `
     --exclude-module PIL `
     --exclude-module Pillow `
@@ -36,16 +45,26 @@ pyinstaller `
     --exclude-module pygments `
     --exclude-module rich `
     --exclude-module chardet `
-    backend/sidecar_entry.py
+    backend\sidecar_entry.py
 
-$Exe = "src-tauri/binaries/ghostchat-server.exe"
-$Target = "src-tauri/binaries/ghostchat-server-$Triple.exe"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "PyInstaller failed with exit code $LASTEXITCODE"
+    exit 1
+}
+
+# Rename with target triple suffix
+$Exe = Join-Path $DistPath "ghostchat-server.exe"
+$Target = Join-Path $DistPath "ghostchat-server-$Triple.exe"
+
+Write-Host "Looking for: $Exe"
 
 if (Test-Path $Exe) {
     Move-Item -Force $Exe $Target
     Write-Host "Sidecar built: $Target"
 } else {
-    Write-Error "PyInstaller output not found"
+    Write-Host "Contents of ${DistPath}:"
+    Get-ChildItem $DistPath | ForEach-Object { Write-Host "  $_" }
+    Write-Error "PyInstaller output not found at $Exe"
     exit 1
 }
 

@@ -60,15 +60,20 @@ jobs:
         working-directory: frontend
 
       # --- Step 2: Build Python sidecar ---
+      - name: Verify frontend built
+        run: Test-Path backend\static\index.html
+        shell: pwsh
+
       - name: Build sidecar
         run: |
           $triple = (rustc -vV | Select-String "host:").ToString().Split(" ")[1]
+          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
           pyinstaller `
             --onefile `
             --name ghostchat-server `
-            --add-data "backend/static;backend/static" `
-            --distpath src-tauri/binaries `
-            --workpath build/pyinstaller `
+            --add-data "backend\static;backend\static" `
+            --distpath src-tauri\binaries `
+            --workpath build\pyinstaller `
             --specpath build `
             --exclude-module numpy `
             --exclude-module PIL `
@@ -82,9 +87,11 @@ jobs:
             --exclude-module pygments `
             --exclude-module rich `
             --exclude-module chardet `
-            backend/sidecar_entry.py
-          Move-Item -Force "src-tauri/binaries/ghostchat-server.exe" "src-tauri/binaries/ghostchat-server-$triple.exe"
-          Write-Host "Sidecar built: ghostchat-server-$triple.exe"
+            backend\sidecar_entry.py
+          $exe = Join-Path "src-tauri" "binaries" "ghostchat-server.exe"
+          $target = Join-Path "src-tauri" "binaries" "ghostchat-server-$triple.exe"
+          Move-Item -Force $exe $target
+          Write-Host "Sidecar built: $target"
         shell: pwsh
 
       # --- Step 3: Build Tauri app ---
