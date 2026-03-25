@@ -16,5 +16,8 @@ dev = [
     "httpx",
 ]
 
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
 [project.scripts]
 ghostchat = "app:main"
