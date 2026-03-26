@@ -85,6 +85,21 @@ export default function App() {
     preloadRnnoise();
   }, []);
 
+  // Auto-enable AI noise suppression when a call starts
+  useEffect(() => {
+    if (!noiseSuppression.enabled && webrtc.localStream) {
+      const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
+      if (track) {
+        noiseSuppression.toggle(track, webrtc.pcRef, webrtc.localStreamRef).then((newTrack) => {
+          if (newTrack) {
+            webrtc.setLocalStream((s) => s ? new MediaStream(s.getTracks()) : s);
+          }
+        });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [webrtc.localStream]);
+
   const handleHost = useCallback(async () => {
     warmUpAudio(); // Unlock AudioContext on user gesture
     setMode("host");
