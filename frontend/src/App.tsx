@@ -16,6 +16,7 @@ import VideoCall from "./components/VideoCall";
 import FileShare from "./components/FileShare";
 import ThemeSelector from "./components/ThemeSelector";
 import { playPeerConnected, playPeerDisconnected, warmUpAudio, preloadRingtone, startRingtone, stopRingtone } from "./utils/sounds";
+import { getApiBaseUrl, getWsBaseUrl } from "./config";
 import type { PresenceStatus } from "./types";
 import "./styles/index.css";
 
@@ -27,7 +28,8 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [mode, setMode] = useState<Mode>(null);
   const [sigUrl, setSigUrl] = useState<string | null>(null);
-  const [hostAddr, setHostAddr] = useState("");
+  const [roomCode, setRoomCode] = useState<string | null>(null);
+  const [roomError, setRoomError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [showThemePanel, setShowThemePanel] = useState(false);
@@ -100,32 +102,59 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webrtc.localStream]);
 
-  const handleHost = useCallback(async () => {
-    warmUpAudio(); // Unlock AudioContext on user gesture
+  const handleCreateRoom = useCallback(async () => {
+    warmUpAudio();
     setMode("host");
+    setRoomError(null);
     try {
-      const res = await fetch("/api/info");
-      const data = await res.json();
-      setHostAddr(`${data.ip}:${data.port}`);
-    } catch {
-      setHostAddr(window.location.host);
+      const res = await fetch(`${getApiBaseUrl()}/api/rooms`, { method: "POST" });
+      if (!res.ok) throw new Error("Server at capacity");
+      const { room_code } = await res.json();
+      setRoomCode(room_code);
+      const wsUrl = `${getWsBaseUrl()}/ws/${room_code}?role=host`;
+      setSigUrl(wsUrl);
+      setScreen("lobby");
+    } catch (err) {
+      setRoomError(err instanceof Error ? err.message : "Failed to create room");
+      setMode(null);
     }
-    const wsUrl = `${wsProto}://${window.location.host}/ws?role=host`;
-    // debug: hosting wsUrl is logged to signaling debugLog instead
-    setSigUrl(wsUrl);
-    setScreen("lobby");
-  }, [wsProto]);
+  }, []);
 
-  const handleJoin = useCallback((addr: string) => {
-    warmUpAudio(); // Unlock AudioContext on user gesture
+  const handleJoinRoom = useCallback(async (code: string) => {
+    warmUpAudio();
     setMode("join");
-    // When joining a different address, the WebSocket goes directly to the
-    // backend (not through Vite proxy), so always use ws:// (backend is HTTP-only).
-    // Only use the page protocol when the address matches the current origin.
-    const proto = addr === window.location.host ? wsProto : "ws";
-    const wsUrl = `${proto}://${addr}/ws?role=join`;
-    // debug: joining wsUrl is logged to signaling debugLog instead
-    setSigUrl(wsUrl);
+    setRoomError(null);
+    const upper = code.toUpperCase().trim();
+
+    // Backward compat: if contains ":", treat as IP:port (old direct-connect flow)
+    if (upper.includes(":")) {
+      const proto = upper === window.location.host ? wsProto : "ws";
+      setSigUrl(`${proto}://${upper}/ws?role=join`);
+      setScreen("lobby");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/rooms/${upper}`);
+      const { exists, joinable } = await res.json();
+      if (!exists) {
+        setRoomError("Room not found. Check the code and try again.");
+        setMode(null);
+        return;
+      }
+      if (!joinable) {
+        setRoomError("Room is full.");
+        setMode(null);
+        return;
+      }
+    } catch {
+      setRoomError("Could not reach signaling server.");
+      setMode(null);
+      return;
+    }
+
+    setRoomCode(upper);
+    setSigUrl(`${getWsBaseUrl()}/ws/${upper}?role=join`);
     setScreen("lobby");
   }, [wsProto]);
 
@@ -147,7 +176,7 @@ export default function App() {
   useEffect(() => {
     if (signaling.state === "open") {
       signaling.addLog(`effect: init (reinit=${webrtc.reinitCounter})`);
-      fetch("/api/ice-config")
+      fetch(`${getApiBaseUrl()}/api/ice-config`)
         .then((r) => r.json())
         .then((config) => webrtc.init(config))
         .catch(() => webrtc.init(null));
@@ -336,7 +365,8 @@ export default function App() {
     setScreen("home");
     setMode(null);
     setSigUrl(null);
-    setHostAddr("");
+    setRoomCode(null);
+    setRoomError(null);
     setFingerprint(null);
     chat.clearMessages();
   }, [webrtc.cleanup, signaling.disconnect, chat.clearMessages, noiseSuppression.teardown]);
@@ -345,21 +375,21 @@ export default function App() {
     webrtc.cleanup();
     monitor.setTimeoutExpired(false);
     // Re-init will be triggered by the signaling.state === "open" effect
-    fetch("/api/ice-config")
+    fetch(`${getApiBaseUrl()}/api/ice-config`)
       .then((r) => r.json())
       .then((config) => webrtc.init(config))
       .catch(() => webrtc.init(null));
   }, [webrtc.cleanup, webrtc.init, monitor.setTimeoutExpired]);
 
   if (screen === "home") {
-    return <Home onHost={handleHost} onJoin={handleJoin} themeId={theme.themeId} onThemeChange={theme.setTheme} />;
+    return <Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} />;
   }
 
   if (screen === "lobby") {
     return (
       <Lobby
         isHost={isHost}
-        hostAddr={hostAddr}
+        roomCode={roomCode}
         connectionState={webrtc.connectionState}
         signalingState={signaling.state}
         signalingUrl={sigUrl}

@@ -5,7 +5,7 @@ const SPINNER_CHARS = ["|", "/", "-", "\\"];
 
 interface LobbyProps {
   isHost: boolean;
-  hostAddr: string;
+  roomCode: string | null;
   connectionState: string;
   signalingState: SignalingState;
   signalingUrl: string | null;
@@ -17,7 +17,7 @@ interface LobbyProps {
 
 export default function Lobby({
   isHost,
-  hostAddr,
+  roomCode,
   connectionState,
   signalingState,
   signalingUrl,
@@ -40,8 +40,9 @@ export default function Lobby({
     return () => clearInterval(id);
   }, [timeoutExpired]);
 
-  const copyAddr = () => {
-    navigator.clipboard.writeText(hostAddr).then(() => {
+  const copyCode = () => {
+    if (!roomCode) return;
+    navigator.clipboard.writeText(roomCode).then(() => {
       setCopied(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
@@ -59,17 +60,17 @@ export default function Lobby({
     : signalingState === "open"
     ? "Waiting for peer..."
     : signalingState === "connecting"
-    ? "Connecting to host..."
+    ? "Connecting to server..."
     : "Initializing...";
 
   return (
     <div className="lobby">
       <h2>{"> "}{isHost ? "HOSTING SESSION" : "JOINING SESSION"}</h2>
 
-      {isHost && hostAddr && (
+      {isHost && roomCode && (
         <div className="addr-box">
-          <span className="addr">{hostAddr}</span>
-          <button className="btn small" onClick={copyAddr}>
+          <span className="addr room-code">{roomCode.split("").join(" ")}</span>
+          <button className="btn small" onClick={copyCode}>
             {copied ? "[ COPIED ]" : "[ COPY ]"}
           </button>
         </div>

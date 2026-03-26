@@ -220,6 +220,16 @@ input[type="text"]:focus:placeholder-shown {
   font-size: 1.125rem;
   color: var(--text);
 }
+.addr.room-code {
+  font-size: 1.75rem;
+  font-weight: bold;
+  letter-spacing: 0.3em;
+}
+.room-error {
+  color: var(--error);
+  font-size: 0.75rem;
+  margin-top: 0.5rem;
+}
 .status-text {
   color: var(--text-dim);
   font-size: 0.6875rem;

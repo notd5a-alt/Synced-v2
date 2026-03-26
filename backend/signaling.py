@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import time
 from typing import Dict
 
@@ -15,7 +16,10 @@ MAX_ROOMS = 100           # Cap total rooms (= 200 max connections)
 HEARTBEAT_INTERVAL = 30   # seconds between pings
 HEARTBEAT_TIMEOUT = 300   # close if no pong within this many seconds
                           # (Chrome throttles background tabs to ~1 timer/min)
-ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong"}
+ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong", "screen-sharing"}
+
+ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 32 chars, no ambiguous 0/O/1/l/I
+ROOM_CODE_LENGTH = 6
 VALID_ROLES = {"host", "join"}
 
 # Rate limiting: token bucket per peer
@@ -269,6 +273,27 @@ class RoomManager:
     def __init__(self):
         self._rooms: Dict[str, SignalingRoom] = {}
         self._lock = asyncio.Lock()
+
+    async def create_room(self) -> str:
+        """Generate a unique room code and pre-create the room."""
+        async with self._lock:
+            if len(self._rooms) >= MAX_ROOMS:
+                raise RoomLimitError(f"Maximum rooms ({MAX_ROOMS}) reached")
+            for _ in range(100):  # retry on collision
+                code = "".join(secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH))
+                if code not in self._rooms:
+                    self._rooms[code] = SignalingRoom(code)
+                    logger.info("Created room %s (%d total)", code, len(self._rooms))
+                    return code
+            raise RoomLimitError("Could not generate unique room code")
+
+    async def room_exists(self, room_id: str) -> tuple[bool, bool]:
+        """Returns (exists, joinable). Joinable = exists and not full."""
+        async with self._lock:
+            room = self._rooms.get(room_id)
+            if not room:
+                return False, False
+            return True, not room.is_full
 
     async def get_room(self, room_id: str) -> SignalingRoom:
         async with self._lock:

@@ -63,11 +63,15 @@ app = FastAPI(lifespan=lifespan)
 # Security headers
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS — allow localhost and LAN origins only
+# CORS — allow localhost, LAN, and configured external origins
 _lan_ip = None
+_extra_origins_raw = os.environ.get("SYNCED_ALLOWED_ORIGINS", "").strip()
+_allow_all_origins = _extra_origins_raw == "*"
 
 def _get_allowed_origins() -> list[str]:
     global _lan_ip
+    if _allow_all_origins:
+        return ["*"]
     if _lan_ip is None:
         _lan_ip = get_local_ip()
     origins = [
@@ -82,12 +86,17 @@ def _get_allowed_origins() -> list[str]:
         f"https://{_lan_ip}:5173",
         "tauri://localhost",
     ]
+    if _extra_origins_raw:
+        for o in _extra_origins_raw.split(","):
+            o = o.strip().rstrip("/")
+            if o and o not in origins:
+                origins.append(o)
     return origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_allowed_origins(),
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -108,6 +117,23 @@ async def _global_exception_handler(request: Request, exc: Exception):
 @app.get("/api/info")
 async def info():
     return {"ip": get_local_ip(), "port": server_port}
+
+
+@app.post("/api/rooms")
+async def create_room():
+    """Create a new room and return a short room code."""
+    try:
+        code = await manager.create_room()
+        return {"room_code": code}
+    except RoomLimitError:
+        return JSONResponse(status_code=503, content={"error": "Server at capacity"})
+
+
+@app.get("/api/rooms/{code}")
+async def check_room(code: str):
+    """Check if a room exists and is joinable."""
+    exists, joinable = await manager.room_exists(code.upper())
+    return {"exists": exists, "joinable": joinable}
 
 
 @app.get("/api/debug")
@@ -152,6 +178,9 @@ _ALLOWED_WS_ORIGINS: set[str] | None = None
 def _get_allowed_ws_origins() -> set[str]:
     global _ALLOWED_WS_ORIGINS
     if _ALLOWED_WS_ORIGINS is None:
+        if _allow_all_origins:
+            _ALLOWED_WS_ORIGINS = set()  # empty = skip check (handled below)
+            return _ALLOWED_WS_ORIGINS
         lan = get_local_ip()
         _ALLOWED_WS_ORIGINS = {
             f"http://localhost:{server_port}",
@@ -167,6 +196,11 @@ def _get_allowed_ws_origins() -> set[str]:
             # Tauri
             "tauri://localhost",
         }
+        if _extra_origins_raw:
+            for o in _extra_origins_raw.split(","):
+                o = o.strip().rstrip("/")
+                if o:
+                    _ALLOWED_WS_ORIGINS.add(o)
     return _ALLOWED_WS_ORIGINS
 
 
@@ -175,15 +209,16 @@ def _get_allowed_ws_origins() -> set[str]:
 async def websocket_endpoint(ws: WebSocket, room_id: str = "default", role: str = "host", token: str | None = None):
     # Validate origin — browsers always send Origin on WS handshakes
     origin = (ws.headers.get("origin") or "").rstrip("/")
-    allowed = _get_allowed_ws_origins()
-    if not origin:
-        logger.debug("WebSocket connection with no Origin header (non-browser client)")
-    elif origin not in allowed:
-        logger.warning("Rejected WebSocket from origin %r (allowed: %s)", origin, allowed)
-        # Must accept before close — Starlette raises RuntimeError on close of unaccepted WS
-        await ws.accept()
-        await ws.close(code=4003, reason="Forbidden origin")
-        return
+    if not _allow_all_origins:
+        allowed = _get_allowed_ws_origins()
+        if not origin:
+            logger.debug("WebSocket connection with no Origin header (non-browser client)")
+        elif origin not in allowed:
+            logger.warning("Rejected WebSocket from origin %r (allowed: %s)", origin, allowed)
+            # Must accept before close — Starlette raises RuntimeError on close of unaccepted WS
+            await ws.accept()
+            await ws.close(code=4003, reason="Forbidden origin")
+            return
 
     try:
         room = await manager.get_room(room_id)

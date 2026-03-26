@@ -268,13 +268,31 @@ fn show_loading_page(window: &tauri::WebviewWindow) {
     "#);
 }
 
+/// Check if running in central mode (signaling server is hosted externally).
+/// Set SYNCED_SIGNALING_URL env var to skip sidecar spawn.
+fn is_central_mode() -> bool {
+    std::env::var("SYNCED_SIGNALING_URL")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
 fn main() {
     let port = parse_port();
+    let central = is_central_mode();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+
+            if central {
+                // Central mode: no sidecar needed — signaling is remote
+                eprintln!("[tauri] Central mode — signaling URL: {}", std::env::var("SYNCED_SIGNALING_URL").unwrap_or_default());
+                app.manage(SidecarState(Mutex::new(None)));
+                // No polling needed — the frontend handles connecting to the remote server.
+                // frontendDist (backend/static/) is served directly by Tauri's asset protocol.
+                return Ok(());
+            }
 
             if is_production() {
                 // Kill any stale sidecar in a background thread — don't block startup.

@@ -4,33 +4,38 @@ import userEvent from '@testing-library/user-event';
 import Home from './Home';
 
 describe('Home', () => {
-  it('renders host and join options', () => {
-    render(<Home onHost={vi.fn()} onJoin={vi.fn()} />);
-    expect(screen.getByText('Host a Session')).toBeInTheDocument();
+  it('renders create room and join options', () => {
+    render(<Home onCreateRoom={vi.fn()} onJoinRoom={vi.fn()} roomError={null} themeId="default" onThemeChange={vi.fn()} />);
+    expect(screen.getByText('Create Room')).toBeInTheDocument();
     expect(screen.getByText('[ JOIN ]')).toBeInTheDocument();
   });
 
-  it('calls onHost when host button is clicked', async () => {
-    const onHost = vi.fn();
-    render(<Home onHost={onHost} onJoin={vi.fn()} />);
-    await userEvent.click(screen.getByText('Host a Session'));
-    expect(onHost).toHaveBeenCalledTimes(1);
+  it('calls onCreateRoom when create button is clicked', async () => {
+    const onCreateRoom = vi.fn();
+    render(<Home onCreateRoom={onCreateRoom} onJoinRoom={vi.fn()} roomError={null} themeId="default" onThemeChange={vi.fn()} />);
+    await userEvent.click(screen.getByText('Create Room'));
+    expect(onCreateRoom).toHaveBeenCalledTimes(1);
   });
 
-  it('calls onJoin with address when form is submitted', async () => {
-    const onJoin = vi.fn();
-    render(<Home onHost={vi.fn()} onJoin={onJoin} />);
+  it('calls onJoinRoom with code when form is submitted', async () => {
+    const onJoinRoom = vi.fn();
+    render(<Home onCreateRoom={vi.fn()} onJoinRoom={onJoinRoom} roomError={null} themeId="default" onThemeChange={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText('Enter host address (ip:port)');
-    await userEvent.type(input, '192.168.1.1:9876');
+    const input = screen.getByPlaceholderText('Enter room code');
+    await userEvent.type(input, 'X7KM3P');
     await userEvent.click(screen.getByText('[ JOIN ]'));
 
-    expect(onJoin).toHaveBeenCalledWith('192.168.1.1:9876');
+    expect(onJoinRoom).toHaveBeenCalledWith('X7KM3P');
   });
 
-  it('disables join button when address is empty', () => {
-    render(<Home onHost={vi.fn()} onJoin={vi.fn()} />);
+  it('disables join button when code is empty', () => {
+    render(<Home onCreateRoom={vi.fn()} onJoinRoom={vi.fn()} roomError={null} themeId="default" onThemeChange={vi.fn()} />);
     const joinBtn = screen.getByText('[ JOIN ]');
     expect(joinBtn).toBeDisabled();
+  });
+
+  it('shows room error when present', () => {
+    render(<Home onCreateRoom={vi.fn()} onJoinRoom={vi.fn()} roomError="Room not found." themeId="default" onThemeChange={vi.fn()} />);
+    expect(screen.getByText('Room not found.')).toBeInTheDocument();
   });
 });

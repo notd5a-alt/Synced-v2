@@ -5,10 +5,10 @@ import Lobby from './Lobby';
 
 const defaultProps = {
   isHost: true,
-  hostAddr: '192.168.1.100:9876',
+  roomCode: 'X7KM3P',
   connectionState: 'new',
   signalingState: 'open' as const,
-  signalingUrl: 'ws://localhost:9876/ws?role=host',
+  signalingUrl: 'ws://localhost:9876/ws/X7KM3P?role=host',
   debugLog: [] as string[],
   timeoutExpired: false,
   onRetry: vi.fn(),
@@ -16,9 +16,9 @@ const defaultProps = {
 };
 
 describe('Lobby', () => {
-  it('shows host address when hosting', () => {
+  it('shows room code when hosting', () => {
     render(<Lobby {...defaultProps} />);
-    expect(screen.getByText('192.168.1.100:9876')).toBeInTheDocument();
+    expect(screen.getByText('X 7 K M 3 P')).toBeInTheDocument();
     expect(screen.getByText(/HOSTING SESSION/)).toBeInTheDocument();
   });
 
@@ -27,9 +27,9 @@ describe('Lobby', () => {
     expect(screen.getByText('Waiting for peer...')).toBeInTheDocument();
   });
 
-  it('shows "Connecting to host..." for joiner', () => {
+  it('shows "Connecting to server..." for joiner', () => {
     render(<Lobby {...defaultProps} isHost={false} signalingState="connecting" />);
-    expect(screen.getByText('Connecting to host...')).toBeInTheDocument();
+    expect(screen.getByText('Connecting to server...')).toBeInTheDocument();
   });
 
   it('shows timeout state with retry/cancel buttons', () => {
@@ -46,7 +46,7 @@ describe('Lobby', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
-  it('shows copy button for host address', () => {
+  it('shows copy button for room code', () => {
     render(<Lobby {...defaultProps} />);
     expect(screen.getByText('[ COPY ]')).toBeInTheDocument();
   });
