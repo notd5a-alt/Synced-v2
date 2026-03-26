@@ -383,12 +383,6 @@ export default function VideoCall({
                 {deafened ? "[ UNDEAFEN ]" : "[ DEAFEN ]"}
               </button>
               <button
-                className={`btn ${audioProcessing?.noiseSuppression ? "" : "muted"}`}
-                onClick={() => onToggleAudioProcessing("noiseSuppression")}
-              >
-                {audioProcessing?.noiseSuppression ? "[ NS ON ]" : "[ NS OFF ]"}
-              </button>
-              <button
                 className={`btn ${audioProcessing?.echoCancellation ? "" : "muted"}`}
                 onClick={() => onToggleAudioProcessing("echoCancellation")}
               >
