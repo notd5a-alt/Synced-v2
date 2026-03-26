@@ -571,8 +571,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
 
       // Register onended BEFORE state update to prevent race with browser's
-      // built-in "Stop sharing" button firing before handler is attached
+      // built-in "Stop sharing" button firing before handler is attached.
+      // Guard against firing while shareScreen() is still executing (B6) —
+      // sharingInProgressRef is cleared in the finally block below.
       screenTrack.onended = () => {
+        if (sharingInProgressRef.current) return;
         stopScreenShare().catch((err: unknown) =>
           console.error("stopScreenShare from onended failed:", err)
         );
@@ -601,21 +604,22 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     const stream = localStreamRef.current;
     if (!pc || !stream) return;
 
+    // Block all camera toggling during screen share to prevent state confusion (B5)
+    if (screenStreamRef.current) {
+      setCallError("Stop screen sharing before changing the camera.");
+      return;
+    }
+
     const existingTrack = stream.getVideoTracks()[0];
     if (existingTrack) {
-      // Turn camera off — stop track and replace with null (no renegotiation)
+      // Turn camera off — capture sender BEFORE stopping track (B2)
+      const sender = pc.getSenders().find((s) => s.track === existingTrack);
       existingTrack.stop();
       stream.removeTrack(existingTrack);
-      const sender = pc.getSenders().find((s) => s.track === existingTrack);
       if (sender) {
         try { await sender.replaceTrack(null); } catch { /* sender gone */ }
       }
     } else {
-      // Block turning camera on during screen share to prevent dual video senders
-      if (screenStreamRef.current) {
-        setCallError("Stop screen sharing before turning the camera on.");
-        return;
-      }
       // Turn camera on — constrain resolution to avoid initial bandwidth spike
       try {
         const videoStream = await navigator.mediaDevices.getUserMedia({
@@ -624,10 +628,14 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         if (cleaningUpRef.current) { videoStream.getTracks().forEach((t) => t.stop()); return; }
         const newTrack = videoStream.getVideoTracks()[0];
         stream.addTrack(newTrack);
-        // Reuse existing video sender (with null track) to avoid creating a second transceiver (H2)
-        const existingSender = pc.getSenders().find(
-          (s) => s.track === null && s !== screenAudioSenderRef.current
-        ) || pc.getSenders().find((s) => s.track?.kind === "video");
+        // Reuse the known video sender from a previous screen share, then fall back
+        // to any active video sender. Avoids picking a null-track AUDIO sender (B1).
+        const existingSender = (
+          screenVideoSenderRef.current
+          && pc.getSenders().includes(screenVideoSenderRef.current)
+        )
+          ? screenVideoSenderRef.current
+          : pc.getSenders().find((s) => s.track?.kind === "video");
         if (existingSender) {
           await existingSender.replaceTrack(newTrack);
         } else {
@@ -635,8 +643,13 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         }
         // Set video codec preferences after adding video transceiver
         preferVideoCodecs(pc);
-      } catch {
-        return; // no camera or permission denied
+      } catch (err) {
+        // Show error feedback so user knows why camera didn't turn on (B3)
+        const msg = (err as DOMException)?.name === "NotAllowedError"
+          ? "Camera permission denied."
+          : "Failed to access camera.";
+        setCallError(msg);
+        return;
       }
     }
     setLocalStream(new MediaStream(stream.getTracks()));
@@ -652,19 +665,44 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     const currentSettings = track.getSettings();
     const nextVal = !(currentSettings[key] ?? true);
 
+    // ── Fast path: try applyConstraints first ──
+    // This works reliably for DISABLING features (EC off, NS off) on most
+    // browsers and avoids the audio gap + device lock of full track replacement.
+    try {
+      await track.applyConstraints({ [key]: nextVal });
+      const actualVal = track.getSettings()[key];
+      if (actualVal === nextVal) {
+        setAudioProcessing((prev) => ({ ...prev, [key]: nextVal }));
+        return; // Browser honored the constraint — done
+      }
+    } catch {
+      // applyConstraints not supported or failed — fall through to track replacement
+    }
+
+    // ── Slow path: full track replacement ──
+    // Needed when re-enabling NS/EC because browsers set up audio processing
+    // pipelines at track creation time and can't re-enable them dynamically.
+
+    // Capture the sender BEFORE stopping the old track (the reference is still valid)
+    const sender = pc.getSenders().find(
+      (s) => s.track === track || s.track?.kind === "audio",
+    );
+
     // Build constraints preserving current device + all processing settings
+    const deviceId = currentSettings.deviceId;
     const constraints: MediaTrackConstraints = {
-      ...(currentSettings.deviceId ? { deviceId: { exact: currentSettings.deviceId } } : {}),
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       noiseSuppression: key === "noiseSuppression" ? nextVal : (currentSettings.noiseSuppression ?? true),
       echoCancellation: key === "echoCancellation" ? nextVal : (currentSettings.echoCancellation ?? true),
       autoGainControl: key === "autoGainControl" ? nextVal : (currentSettings.autoGainControl ?? true),
     };
 
+    // Stop the old track FIRST to release the device — on Windows (WASAPI),
+    // some drivers only allow one active capture at a time. Calling getUserMedia
+    // while the old track is still live can fail or return a silent track.
+    track.stop();
+
     try {
-      // Create a brand-new audio track with the desired constraints.
-      // Browsers set up NS/EC/AGC pipelines at track creation time and often
-      // cannot re-enable them via applyConstraints on an existing track,
-      // which causes the toggle to get stuck in the "off" position.
       const newStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
       if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
         newStream.getTracks().forEach((t) => t.stop());
@@ -674,13 +712,11 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       const newTrack = newStream.getAudioTracks()[0];
 
       // Replace the track on the PC sender (no renegotiation needed)
-      const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
       if (sender) {
         await sender.replaceTrack(newTrack);
       }
 
-      // Stop old track and swap into the local stream
-      track.stop();
+      // Swap into the local stream
       localStreamRef.current.removeTrack(track);
       localStreamRef.current.addTrack(newTrack);
       setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
@@ -693,7 +729,31 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         autoGainControl: newSettings.autoGainControl ?? true,
       });
     } catch (err) {
-      console.warn("toggleAudioProcessing failed:", err);
+      console.warn("toggleAudioProcessing: track replacement failed:", err);
+
+      // Emergency fallback — the old track is already stopped, so we must
+      // restore audio or the user is left with silence. Try the default device.
+      try {
+        const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
+          fallbackStream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        const fallbackTrack = fallbackStream.getAudioTracks()[0];
+        if (sender) await sender.replaceTrack(fallbackTrack);
+        localStreamRef.current.removeTrack(track);
+        localStreamRef.current.addTrack(fallbackTrack);
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+
+        const fbSettings = fallbackTrack.getSettings();
+        setAudioProcessing({
+          noiseSuppression: fbSettings.noiseSuppression ?? true,
+          echoCancellation: fbSettings.echoCancellation ?? true,
+          autoGainControl: fbSettings.autoGainControl ?? true,
+        });
+      } catch {
+        console.error("toggleAudioProcessing: emergency fallback also failed — no audio");
+      }
     }
   }, []);
 

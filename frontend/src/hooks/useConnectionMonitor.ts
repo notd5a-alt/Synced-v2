@@ -367,9 +367,10 @@ export default function useConnectionMonitor(
         for (const sender of senders) {
           if (sender.track?.kind !== "video") continue;
           // Use higher bitrate tiers for screen share content
-          // Detect via contentHint ("detail"/"text") or non-camera label (H7)
+          // Detect screen share via contentHint which we control (set in shareScreen).
+          // Don't rely on track.label which is browser-specific and unreliable (B7).
           const hint = sender.track.contentHint;
-          const isScreenShare = hint === "detail" || hint === "text" || sender.track.label?.includes("screen");
+          const isScreenShare = hint === "detail" || hint === "text";
           const tier = isScreenShare
             ? SCREEN_BANDWIDTH_TIERS[connectionQuality]
             : BANDWIDTH_TIERS[connectionQuality];

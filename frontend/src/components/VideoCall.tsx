@@ -98,7 +98,7 @@ export default function VideoCall({
     .some((t) => t.readyState === "live" && !t.muted);
 
   const audioEnabled = localStream?.getAudioTracks()[0]?.enabled;
-  const hasVideo = localStream?.getVideoTracks().some((t) => t.readyState === "live");
+  const hasVideo = localStream?.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
   const inCall = !!localStream;
   const isSharing = !!screenStream;
 
