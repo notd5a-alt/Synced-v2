@@ -430,7 +430,23 @@ fn main() {
                                 window.__syncedDiagErrors = window.__syncedDiagErrors || [];
                                 errors = window.__syncedDiagErrors;
 
+                                // Check which resources loaded/failed
+                                var resources = '';
+                                try {
+                                    var entries = performance.getEntriesByType('resource');
+                                    resources = entries.map(function(e) {
+                                        return e.name.replace(url, '') + ' (' + Math.round(e.duration) + 'ms)';
+                                    }).join('\n  ');
+                                } catch(e) { resources = '(unavailable)'; }
+
+                                // List script tags
+                                var scripts = Array.from(document.querySelectorAll('script')).map(function(s) {
+                                    return (s.type || 'classic') + ': ' + (s.src || '(inline)');
+                                }).join('\n  ');
+
                                 var diag = 'URL: ' + url + '\nTitle: ' + title + '\nRoot children: ' + rootChildren + '\nBody: ' + bodyText;
+                                if (scripts) diag += '\nScripts:\n  ' + scripts;
+                                if (resources) diag += '\nResources:\n  ' + resources;
                                 if (errors.length > 0) diag += '\nErrors: ' + errors.join('; ');
 
                                 // If root is empty or missing, the app failed to render

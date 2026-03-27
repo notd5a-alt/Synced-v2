@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 import re
 import socket
 import traceback
 from pathlib import Path
+
+# Fix MIME types on Windows — Python reads from the registry, which may lack
+# entries for .js/.mjs/.wasm. Without this, StaticFiles serves JS with the wrong
+# content-type and browsers silently reject module scripts.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
+mimetypes.add_type("application/json", ".json")
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, Request
