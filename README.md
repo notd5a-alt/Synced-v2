@@ -1,4 +1,4 @@
-<img width="1684" height="937" alt="image" src="https://github.com/user-attachments/assets/1843837b-e885-4a29-81bc-09bd2b9eddb1" /># Synced
+# Synced
 
 **Zero-trust peer-to-peer voice, video, text chat, and file sharing.**
 
