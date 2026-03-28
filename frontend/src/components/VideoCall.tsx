@@ -33,6 +33,8 @@ interface VideoCallProps {
   audioDevices: AudioDevicesHook;
   micLevel: number;
   remoteAudioRef: React.RefObject<HTMLVideoElement | null>;
+  deafened: boolean;
+  onToggleDeafen: () => void;
 }
 
 export default function VideoCall({
@@ -63,6 +65,8 @@ export default function VideoCall({
   audioDevices,
   micLevel,
   remoteAudioRef,
+  deafened,
+  onToggleDeafen,
 }: VideoCallProps) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLVideoElement>(null);
@@ -71,7 +75,6 @@ export default function VideoCall({
   const dualScreenRef = useRef<HTMLVideoElement>(null);
   const screenRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [deafened, setDeafened] = useState(false);
   const [isPip, setIsPip] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiag, setShowDiag] = useState(false);
@@ -225,18 +228,18 @@ export default function VideoCall({
           className={`remote-video ${remoteSpeaking ? "speaking" : ""}`}
           autoPlay
           playsInline
-          muted={deafened}
+          muted
           style={{
-            display: hasRemoteVideo && !hasDualVideo ? "block"
-              : hasDualVideo && expandedView === "camera" ? "block"
+            display: inCall && hasRemoteVideo && !hasDualVideo ? "block"
+              : inCall && hasDualVideo && expandedView === "camera" ? "block"
               : "none",
-            cursor: expandedView === "camera" ? "pointer" : "default",
+            cursor: inCall && ((hasRemoteVideo && !hasDualVideo) || expandedView === "camera") ? "pointer" : "default",
           }}
-          role={expandedView === "camera" ? "button" : undefined}
-          tabIndex={expandedView === "camera" ? 0 : undefined}
-          aria-label={expandedView === "camera" ? "Return to split view" : undefined}
-          onClick={expandedView === "camera" ? () => setExpandedView(null) : undefined}
-          onKeyDown={expandedView === "camera" ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpandedView(null); } } : undefined}
+          role={inCall && ((hasRemoteVideo && !hasDualVideo) || expandedView === "camera") ? "button" : undefined}
+          tabIndex={inCall && ((hasRemoteVideo && !hasDualVideo) || expandedView === "camera") ? 0 : undefined}
+          aria-label={inCall && hasRemoteVideo && !hasDualVideo ? "Toggle fullscreen" : inCall && expandedView === "camera" ? "Return to split view" : undefined}
+          onClick={inCall && hasRemoteVideo && !hasDualVideo ? toggleFullscreen : inCall && expandedView === "camera" ? () => setExpandedView(null) : undefined}
+          onKeyDown={inCall && ((hasRemoteVideo && !hasDualVideo) || expandedView === "camera") ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); hasRemoteVideo && !hasDualVideo ? toggleFullscreen() : setExpandedView(null); } } : undefined}
         />
         {/* Always-mounted remote screen share video */}
         <video
@@ -245,20 +248,20 @@ export default function VideoCall({
           autoPlay
           playsInline
           style={{
-            display: !hasDualVideo && hasRemoteScreen && !hasRemoteVideo ? "block"
-              : hasDualVideo && expandedView === "screen" ? "block"
+            display: inCall && !hasDualVideo && hasRemoteScreen && !hasRemoteVideo ? "block"
+              : inCall && hasDualVideo && expandedView === "screen" ? "block"
               : "none",
-            cursor: expandedView === "screen" ? "pointer" : "default",
+            cursor: inCall && ((!hasDualVideo && hasRemoteScreen && !hasRemoteVideo) || expandedView === "screen") ? "pointer" : "default",
           }}
-          role={expandedView === "screen" ? "button" : undefined}
-          tabIndex={expandedView === "screen" ? 0 : undefined}
-          aria-label={expandedView === "screen" ? "Return to split view" : undefined}
-          onClick={expandedView === "screen" ? () => setExpandedView(null) : undefined}
-          onKeyDown={expandedView === "screen" ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpandedView(null); } } : undefined}
+          role={inCall && ((!hasDualVideo && hasRemoteScreen && !hasRemoteVideo) || expandedView === "screen") ? "button" : undefined}
+          tabIndex={inCall && ((!hasDualVideo && hasRemoteScreen && !hasRemoteVideo) || expandedView === "screen") ? 0 : undefined}
+          aria-label={inCall && !hasDualVideo && hasRemoteScreen && !hasRemoteVideo ? "Toggle fullscreen" : inCall && expandedView === "screen" ? "Return to split view" : undefined}
+          onClick={inCall && !hasDualVideo && hasRemoteScreen && !hasRemoteVideo ? toggleFullscreen : inCall && expandedView === "screen" ? () => setExpandedView(null) : undefined}
+          onKeyDown={inCall && ((!hasDualVideo && hasRemoteScreen && !hasRemoteVideo) || expandedView === "screen") ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); !hasDualVideo && hasRemoteScreen && !hasRemoteVideo ? toggleFullscreen() : setExpandedView(null); } } : undefined}
         />
         {/* Dual video side-by-side layout — always mounted to avoid DOM churn */}
         <div className="dual-video-container"
-             style={{ display: hasDualVideo && expandedView === null ? "flex" : "none" }}>
+             style={{ display: inCall && hasDualVideo && expandedView === null ? "flex" : "none" }}>
           <div
             className="dual-video-item"
             role="button"
@@ -420,7 +423,7 @@ export default function VideoCall({
               </button>
               <button
                 className={`btn ${deafened ? "muted" : ""}`}
-                onClick={() => setDeafened((d) => !d)}
+                onClick={onToggleDeafen}
               >
                 {deafened ? "[ UNDEAFEN ]" : "[ DEAFEN ]"}
               </button>

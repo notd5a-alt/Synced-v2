@@ -54,7 +54,7 @@ export default function useConnectionMonitor(
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevBytesRef = useRef(0);
   const prevTimestampRef = useRef(0);
   const smoothBitrateRef = useRef(0);
@@ -70,7 +70,7 @@ export default function useConnectionMonitor(
     if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
     if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
     if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-    if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+    if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
     disconnectTimerRef.current = null;
     timeoutTimerRef.current = null;
     restartTimeoutRef.current = null;
@@ -188,7 +188,7 @@ export default function useConnectionMonitor(
   const pollingRef = useRef(false); // guard against overlapping polls (C5)
   useEffect(() => {
     if (connectionState !== "connected") {
-      if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+      if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
       statsIntervalRef.current = null;
       return;
     }
@@ -339,11 +339,26 @@ export default function useConnectionMonitor(
       }
     };
 
-    statsIntervalRef.current = setInterval(pollStats, STATS_INTERVAL);
-    pollStats();
+    // Fast initial burst: poll at 500ms for first 3 samples to establish
+    // quality tier quickly (~1.5s instead of ~6s), then switch to normal 3s
+    const FAST_INTERVAL = 500;
+    const FAST_POLLS = 3;
+    let pollCount = 0;
+
+    const schedulePoll = () => {
+      const interval = pollCount < FAST_POLLS ? FAST_INTERVAL : STATS_INTERVAL;
+      statsIntervalRef.current = setTimeout(() => {
+        pollStats().then(() => {
+          pollCount++;
+          schedulePoll();
+        });
+      }, interval);
+    };
+
+    pollStats().then(() => { pollCount++; schedulePoll(); });
 
     return () => {
-      if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+      if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
       statsIntervalRef.current = null;
     };
   }, [connectionState, pcRef]);
@@ -383,6 +398,9 @@ export default function useConnectionMonitor(
           params.encodings[0].maxBitrate = tier.maxBitrate;
           params.encodings[0].scaleResolutionDownBy = tier.scaleDown;
           params.encodings[0].maxFramerate = tier.maxFramerate;
+          // Prefer dropping resolution over framerate — users perceive
+          // low framerate as "choppy" which is worse than "blurry"
+          (params.encodings[0] as any).degradationPreference = "maintain-framerate";
           try {
             await sender.setParameters(params);
           } catch { /* encoding params not supported */ }

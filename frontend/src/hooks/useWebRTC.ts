@@ -4,7 +4,11 @@ import { preferVideoCodecs, preferAudioCodecs, optimizeOpusInSDP } from "../util
 import type { SignalingHook, SignalingMessage, AudioProcessingState } from "../types";
 
 const DEFAULT_ICE_CONFIG: RTCConfiguration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
+  ],
 };
 
 export interface WebRTCHook {
@@ -302,7 +306,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           log("RTC creating offer...");
           const offer = await pc.createOffer();
           if (pc.signalingState !== "stable") { log("RTC offer aborted (not stable)"); return; }
-          if (offer.sdp) offer.sdp = optimizeOpusInSDP(offer.sdp);
+          if (offer.sdp) offer.sdp = optimizeOpusInSDP(offer.sdp, !!screenAudioSenderRef.current);
           await pc.setLocalDescription(offer);
           log("RTC offer created, sending");
           signalingRef.current.send({
@@ -370,7 +374,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           }
           await flushPendingCandidates();
           const answer = await pc.createAnswer();
-          if (answer.sdp) answer.sdp = optimizeOpusInSDP(answer.sdp);
+          if (answer.sdp) answer.sdp = optimizeOpusInSDP(answer.sdp, !!screenAudioSenderRef.current);
           await pc.setLocalDescription(answer);
           log("RTC answer created, sending");
           signalingRef.current.send({
@@ -550,8 +554,21 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30, max: 60 }, cursor: "always" } as MediaTrackConstraints,
-        audio: true, // request system audio (Chrome shows a checkbox)
-      });
+        audio: {
+          // Disable speech processing for system audio — these cause muffling
+          // of music, game audio, and video playback
+          noiseSuppression: false,
+          echoCancellation: false,
+          autoGainControl: false,
+        },
+        // Ask Chrome to offer system audio checkbox when sharing entire screen
+        // (without this, audio is only offered for tab/window shares)
+        systemAudio: "include",
+        // Allow user to switch shared surface mid-share
+        surfaceSwitching: "include",
+        // Ensure "Entire Screen" option is available in the picker
+        monitorTypeSurfaces: "include",
+      } as any);
 
       // Abort if stopScreenShare or cleanup was called while awaiting getDisplayMedia (C4/H4)
       if (!sharingInProgressRef.current || cleaningUpRef.current || pcRef.current !== pc) {
@@ -573,6 +590,9 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       // Add screen as a new video sender — triggers onnegotiationneeded
       screenVideoSenderRef.current = pc.addTrack(screenTrack, stream);
 
+      // Set screen-optimized codec preferences (VP9 for sharp text/code)
+      preferVideoCodecs(pc, "screen");
+
       // Notify receiver of the screen track ID (contentHint doesn't propagate over WebRTC)
       signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id });
 
@@ -590,6 +610,7 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           if (params.encodings?.length > 0) {
             params.encodings[0].maxBitrate = 1_500_000;
             params.encodings[0].maxFramerate = 30;
+            (params.encodings[0] as any).degradationPreference = "maintain-framerate";
             await screenSender.setParameters(params);
           }
         } catch { /* encoding params not supported */ }
@@ -605,8 +626,22 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       if (audioTrack) {
         // Hint encoder to preserve fidelity for system audio (not speech-optimized)
         if ("contentHint" in audioTrack) audioTrack.contentHint = "music";
+        // Ensure speech processing is disabled (fallback if getDisplayMedia ignored constraints)
+        try {
+          await audioTrack.applyConstraints({
+            noiseSuppression: false,
+            echoCancellation: false,
+            autoGainControl: false,
+          });
+        } catch { /* constraints not supported for display audio */ }
         try {
           screenAudioSenderRef.current = pc.addTrack(audioTrack, stream);
+          // Set higher bitrate for screen share audio (music/system audio needs more than voice)
+          const params = screenAudioSenderRef.current.getParameters();
+          if (params.encodings?.length > 0) {
+            params.encodings[0].maxBitrate = 128_000; // 128kbps for stereo music
+            await screenAudioSenderRef.current.setParameters(params);
+          }
         } catch (err) {
           console.error("failed to add screen audio:", err);
         }
@@ -680,7 +715,22 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           cameraVideoSenderRef.current = pc.addTrack(newTrack, stream);
         }
         // Set video codec preferences after adding video transceiver
-        preferVideoCodecs(pc);
+        preferVideoCodecs(pc, "camera");
+        // Set initial camera bitrate — bandwidth adaptation will adjust after
+        // connection quality is measured, but this prevents the browser from
+        // starting at an extremely conservative bitrate (~300kbps).
+        const camSender = cameraVideoSenderRef.current;
+        if (camSender) {
+          try {
+            const params = camSender.getParameters();
+            if (params.encodings?.length > 0) {
+              params.encodings[0].maxBitrate = 1_500_000;
+              params.encodings[0].maxFramerate = 24;
+              (params.encodings[0] as any).degradationPreference = "maintain-framerate";
+              await camSender.setParameters(params);
+            }
+          } catch { /* encoding params not supported */ }
+        }
       } catch (err) {
         // Show error feedback so user knows why camera didn't turn on (B3)
         const msg = (err as DOMException)?.name === "NotAllowedError"

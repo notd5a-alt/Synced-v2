@@ -1,14 +1,17 @@
 // Codec preference configuration for WebRTC
-// Prefers VP9 > VP8 > H264 for real-time video (AV1 HW encode support is rare),
-// Opus for audio with voice optimization
+// Camera: H264 (best HW encode) > VP8 > VP9; Screen: VP9 (sharp text) > H264 > VP8
+// Opus for audio with per-stream optimization (voice vs. music)
 
 /**
- * Set video codec preferences on all video transceivers.
- * Prefers VP9 > VP8 > H264 for real-time video.
- * AV1 is deprioritized — most machines lack HW encode, and software AV1
- * causes 100ms+ latency and excessive CPU in real-time video.
+ * Set video codec preferences on video transceivers.
+ * - "camera" (default): H264 first (near-universal HW encode), then VP8, VP9
+ * - "screen": VP9 first (better compression for sharp text/code), then H264, VP8
+ * AV1 is always deprioritized — most machines lack HW encode.
  */
-export function preferVideoCodecs(pc: RTCPeerConnection): void {
+export function preferVideoCodecs(
+  pc: RTCPeerConnection,
+  contentType: "camera" | "screen" = "camera"
+): void {
   if (!RTCRtpTransceiver.prototype.setCodecPreferences) return; // Safari fallback
 
   const transceivers = pc.getTransceivers();
@@ -18,13 +21,20 @@ export function preferVideoCodecs(pc: RTCPeerConnection): void {
         const codecs = RTCRtpReceiver.getCapabilities("video")?.codecs;
         if (!codecs) continue;
 
-        // Sort: VP9 first, then VP8, then H264, then AV1 (needs HW), then rest
         const sorted = [...codecs].sort((a, b) => {
           const rank = (c: { mimeType: string }): number => {
             const mime = c.mimeType.toLowerCase();
-            if (mime.includes("vp9")) return 0;
-            if (mime.includes("vp8")) return 1;
-            if (mime.includes("h264")) return 2;
+            if (contentType === "camera") {
+              // Camera: H264 (best HW encode support) > VP8 > VP9
+              if (mime.includes("h264")) return 0;
+              if (mime.includes("vp8")) return 1;
+              if (mime.includes("vp9")) return 2;
+            } else {
+              // Screen: VP9 (sharp text at lower bitrate) > H264 > VP8
+              if (mime.includes("vp9")) return 0;
+              if (mime.includes("h264")) return 1;
+              if (mime.includes("vp8")) return 2;
+            }
             if (mime.includes("av1") || mime.includes("av01")) return 3;
             return 4;
           };
@@ -68,33 +78,36 @@ export function preferAudioCodecs(pc: RTCPeerConnection): void {
   }
 }
 
+// Voice-optimized Opus params (mic audio)
+const VOICE_OPUS_PARAMS: Record<string, number> = {
+  usedtx: 1,              // Discontinuous transmission — saves bandwidth during silence
+  useinbandfec: 1,        // Forward error correction — resilience to packet loss
+  maxaveragebitrate: 48000, // 48kbps — good quality for wideband voice
+};
+
+// Music/system audio Opus params (screen share audio)
+const MUSIC_OPUS_PARAMS: Record<string, number> = {
+  usedtx: 0,              // No DTX — continuous audio, no silence detection
+  useinbandfec: 1,        // FEC still useful for loss resilience
+  maxaveragebitrate: 128000, // 128kbps — sufficient for stereo music
+  stereo: 1,              // Enable stereo decoding
+  "sprop-stereo": 1,      // Signal that we send stereo
+} as Record<string, number>;
+
 /**
- * Optimize Opus settings in SDP for voice communication.
- * Enables: DTX (saves bandwidth during silence), FEC (resilience to packet loss),
- * Sets: maxaveragebitrate to 48kbps (good quality wideband voice).
+ * Apply Opus params to a single audio m-section's fmtp line.
  */
-export function optimizeOpusInSDP(sdp: string): string {
-  if (!sdp) return sdp;
+function applyOpusParams(section: string, opusParams: Record<string, number>): string {
+  const opusMatches = [...section.matchAll(/a=rtpmap:(\d+) opus\/48000/g)];
+  if (opusMatches.length === 0) return section;
 
-  const opusParams: Record<string, number> = {
-    usedtx: 1, // Discontinuous transmission — saves bandwidth during silence
-    useinbandfec: 1, // Forward error correction — resilience to packet loss
-    maxaveragebitrate: 48000, // 48kbps — good quality for wideband voice
-    // Don't force mono — screen share system audio may be stereo
-  };
-
-  // Find ALL Opus payload types (multi-stream SDPs may have more than one)
-  const opusMatches = [...sdp.matchAll(/a=rtpmap:(\d+) opus\/48000/g)];
-  if (opusMatches.length === 0) return sdp;
-
-  let result = sdp;
+  let result = section;
   for (const match of opusMatches) {
     const pt = match[1];
     const fmtpRegex = new RegExp(`a=fmtp:${pt} (.+)`);
     const fmtpMatch = result.match(fmtpRegex);
 
     if (fmtpMatch) {
-      // Parse existing params and merge
       const existing: Record<string, string> = {};
       fmtpMatch[1].split(";").forEach((p) => {
         const [k, v] = p.trim().split("=");
@@ -106,7 +119,6 @@ export function optimizeOpusInSDP(sdp: string): string {
         .join(";");
       result = result.replace(fmtpRegex, `a=fmtp:${pt} ${paramStr}`);
     } else {
-      // Add fmtp line after rtpmap
       const paramStr = Object.entries(opusParams)
         .map(([k, v]) => `${k}=${v}`)
         .join(";");
@@ -116,6 +128,53 @@ export function optimizeOpusInSDP(sdp: string): string {
       );
     }
   }
-
   return result;
+}
+
+/**
+ * Optimize Opus settings in SDP with per-stream differentiation.
+ * - Voice (mic): DTX on, 48kbps, mono
+ * - Music (screen share audio): DTX off, 128kbps, stereo
+ *
+ * When screenAudioActive is true, the first audio m-section gets voice params
+ * and subsequent audio m-sections get music params.
+ */
+export function optimizeOpusInSDP(sdp: string, screenAudioActive = false): string {
+  if (!sdp) return sdp;
+
+  if (!screenAudioActive) {
+    // Simple path: apply voice params to everything
+    return applyOpusParams(sdp, VOICE_OPUS_PARAMS);
+  }
+
+  // Split SDP into m-line sections for per-stream params
+  const lines = sdp.split("\r\n");
+  const sections: { start: number; isAudio: boolean }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("m=")) {
+      sections.push({ start: i, isAudio: lines[i].startsWith("m=audio") });
+    }
+  }
+
+  if (sections.length === 0) return applyOpusParams(sdp, VOICE_OPUS_PARAMS);
+
+  // Process each m-section independently
+  let audioIndex = 0;
+  const resultParts: string[] = [];
+  for (let s = 0; s < sections.length; s++) {
+    const start = sections[s].start;
+    const end = s + 1 < sections.length ? sections[s + 1].start : lines.length;
+    let sectionText = lines.slice(start, end).join("\r\n");
+
+    if (sections[s].isAudio) {
+      const params = audioIndex === 0 ? VOICE_OPUS_PARAMS : MUSIC_OPUS_PARAMS;
+      sectionText = applyOpusParams(sectionText, params);
+      audioIndex++;
+    }
+    resultParts.push(sectionText);
+  }
+
+  // Prepend the session-level lines (before first m=)
+  const sessionLines = lines.slice(0, sections[0].start).join("\r\n");
+  return sessionLines + "\r\n" + resultParts.join("\r\n");
 }

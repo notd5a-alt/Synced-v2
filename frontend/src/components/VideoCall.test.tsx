@@ -23,9 +23,16 @@ const defaultProps = {
   signalingState: 'open',
   audioProcessing: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
   onToggleAudioProcessing: vi.fn(),
+  aiNsEnabled: false,
+  onToggleAiNs: vi.fn(),
   stats: null,
   localSpeaking: false,
   remoteSpeaking: false,
+  audioDevices: { inputDevices: [], outputDevices: [], selectedInput: '', selectedOutput: '', setInputDevice: vi.fn(), setOutputDevice: vi.fn() } as any,
+  micLevel: 0,
+  remoteAudioRef: { current: null },
+  deafened: false,
+  onToggleDeafen: vi.fn(),
 };
 
 describe('VideoCall', () => {

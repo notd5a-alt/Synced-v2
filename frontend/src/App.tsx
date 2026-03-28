@@ -31,6 +31,7 @@ export default function App() {
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("chat");
+  const [deafened, setDeafened] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [showThemePanel, setShowThemePanel] = useState(false);
   const sigConnectedRef = useRef(false);
@@ -45,6 +46,7 @@ export default function App() {
   const files = useFileTransfer(webrtc.fileChannel, webrtc.hmacKey);
   const vad = useVAD(webrtc.localStream, webrtc.remoteStream);
   const remoteAudioRef = useRef<HTMLVideoElement | null>(null);
+  const persistentAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioDevices = useAudioDevices(
     webrtc.localStreamRef,
     webrtc.pcRef,
@@ -54,6 +56,16 @@ export default function App() {
   );
   const micLevel = useMicLevel(webrtc.localStream);
   const noiseSuppression = useNoiseSuppression();
+
+  // Keep persistent audio element in sync with remote stream so call audio
+  // continues playing when the user switches to Chat or Files tabs.
+  // When localStream is null (call ended or not started), clear srcObject
+  // so audio from the other peer stops immediately.
+  useEffect(() => {
+    if (persistentAudioRef.current) {
+      persistentAudioRef.current.srcObject = webrtc.localStream ? webrtc.remoteStream : null;
+    }
+  }, [webrtc.localStream, webrtc.remoteStream, webrtc.streamRevision]);
 
   // Transition to session once WebRTC connects
   useEffect(() => {
@@ -70,6 +82,10 @@ export default function App() {
     nsAutoEnabledRef.current = false;
     noiseSuppression.teardown();
     webrtc.cleanup();
+    // Immediately stop remote audio playback — don't wait for React's effect cycle
+    if (persistentAudioRef.current) {
+      persistentAudioRef.current.srcObject = null;
+    }
     signaling.disconnect();
     setScreen("home");
     setMode(null);
@@ -536,6 +552,16 @@ export default function App() {
         </div>
       )}
 
+      {/* Persistent audio element — stays mounted across tab switches so call audio
+           continues regardless of which tab is active. VideoCall's <video> elements
+           are always muted; this is the sole audio output path. */}
+      <audio
+        ref={persistentAudioRef}
+        autoPlay
+        muted={deafened}
+        style={{ display: "none" }}
+      />
+
       <main className="session-content">
         {activeTab === "chat" && (
           <Chat
@@ -588,6 +614,8 @@ export default function App() {
             audioDevices={audioDevices}
             micLevel={micLevel}
             remoteAudioRef={remoteAudioRef}
+            deafened={deafened}
+            onToggleDeafen={() => setDeafened(d => !d)}
           />
         )}
         {activeTab === "files" && (
