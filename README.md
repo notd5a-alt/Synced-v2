@@ -4,7 +4,7 @@
 
 No accounts. No servers in the middle. No traces. All communication flows directly between peers over encrypted WebRTC connections. The signaling server only relays connection setup — it never sees your content.
 
-<img width="1693" height="981" alt="image" src="https://github.com/user-attachments/assets/b15ddcde-8347-40d5-8a2f-cbf55f8cb209" />
+<img width="1693" height="981" alt="image" src="https://github.com/user-attachments/assets/2195ed8b-c962-42a5-9bfe-9f4b2812d937" />
 
 ---
 
