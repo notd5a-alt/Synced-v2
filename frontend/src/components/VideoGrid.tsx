@@ -178,6 +178,9 @@ export default function VideoGrid({
     startY: number;
     origX: number;
     origY: number;
+    el: HTMLElement | null; // direct DOM ref for perf
+    currentX: number;
+    currentY: number;
   } | null>(null);
   const wasDraggedRef = useRef(false);
   const positionsRef = useRef(positions);
@@ -192,6 +195,7 @@ export default function VideoGrid({
   } | null>(null);
   const canvasOffsetRef = useRef(canvasOffset);
   canvasOffsetRef.current = canvasOffset;
+  const canvasInnerRef = useRef<HTMLDivElement>(null);
 
   // Build tile list
   const tiles = useMemo(() => {
@@ -340,6 +344,9 @@ export default function VideoGrid({
   }, []);
 
   // --- Drag handlers ---
+  // Performance: during drag, we manipulate DOM directly (style.left/top)
+  // and only commit to React state on pointerUp. This avoids re-rendering
+  // the entire component tree (incl. Three.js visualizers) on every frame.
   const handlePointerDown = useCallback(
     (e: React.PointerEvent, key: string) => {
       if (e.button !== 0) return;
@@ -349,7 +356,8 @@ export default function VideoGrid({
       const pos = positionsRef.current.get(key);
       if (!pos) return;
 
-      e.currentTarget.setPointerCapture(e.pointerId);
+      const tileEl = e.currentTarget as HTMLElement;
+      tileEl.setPointerCapture(e.pointerId);
       wasDraggedRef.current = false;
       draggingRef.current = {
         key,
@@ -357,6 +365,9 @@ export default function VideoGrid({
         startY: e.clientY,
         origX: pos.x,
         origY: pos.y,
+        el: tileEl,
+        currentX: pos.x,
+        currentY: pos.y,
       };
     },
     [],
@@ -379,31 +390,65 @@ export default function VideoGrid({
       ) {
         return;
       }
-      wasDraggedRef.current = true;
-      setDraggingKey(drag.key);
+
+      if (!wasDraggedRef.current) {
+        wasDraggedRef.current = true;
+        setDraggingKey(drag.key);
+      }
 
       const rect = container.getBoundingClientRect();
-      const pxToPercentX = (100 / rect.width) * dx;
-      const pxToPercentY = (100 / rect.height) * dy;
+      const newX = drag.origX + (100 / rect.width) * dx;
+      const newY = drag.origY + (100 / rect.height) * dy;
 
-      const newX = drag.origX + pxToPercentX;
-      const newY = drag.origY + pxToPercentY;
+      drag.currentX = newX;
+      drag.currentY = newY;
 
-      setPositions((prev) => {
-        const next = new Map(prev);
-        next.set(drag.key, { x: newX, y: newY });
-        return next;
-      });
+      // Direct DOM update — no React re-render
+      if (drag.el) {
+        drag.el.style.left = `${newX}%`;
+        drag.el.style.top = `${newY}%`;
+      }
+
+      // Update connector SVG lines directly if this tile is connected
+      const svgContainer = canvasInnerRef.current?.querySelector(".canvas-connectors");
+      if (svgContainer) {
+        const line = svgContainer.querySelector(`[data-peer="${drag.key}"], [data-screen="${drag.key}"]`) as SVGLineElement | null;
+        if (line) {
+          const dim = tileDims.get(drag.key);
+          if (dim) {
+            const h = tileHeightPct(dim, containerAR);
+            const cx = newX + dim.w / 2;
+            const cy = newY + h / 2;
+            if (line.dataset.peer === drag.key) {
+              line.setAttribute("x1", `${cx}%`);
+              line.setAttribute("y1", `${cy}%`);
+            } else {
+              line.setAttribute("x2", `${cx}%`);
+              line.setAttribute("y2", `${cy}%`);
+            }
+          }
+        }
+      }
     },
-    [],
+    [tileDims, containerAR],
   );
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    if (draggingRef.current) {
+    const drag = draggingRef.current;
+    if (drag) {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      // Commit final position to React state (single re-render)
+      const finalX = drag.currentX;
+      const finalY = drag.currentY;
+      const key = drag.key;
       draggingRef.current = null;
       setDraggingKey(null);
       if (wasDraggedRef.current) {
+        setPositions((prev) => {
+          const next = new Map(prev);
+          next.set(key, { x: finalX, y: finalY });
+          return next;
+        });
         setTimeout(() => { wasDraggedRef.current = false; }, 0);
       }
     }
@@ -428,12 +473,19 @@ export default function VideoGrid({
     if (!pan) return;
     const dx = e.clientX - pan.startX;
     const dy = e.clientY - pan.startY;
-    setCanvasOffset({ x: pan.origOffsetX + dx, y: pan.origOffsetY + dy });
+    // Direct DOM update for smooth panning
+    const inner = canvasInnerRef.current;
+    if (inner) {
+      inner.style.transform = `translate(${pan.origOffsetX + dx}px, ${pan.origOffsetY + dy}px)`;
+    }
+    canvasOffsetRef.current = { x: pan.origOffsetX + dx, y: pan.origOffsetY + dy };
   }, []);
 
   const handleCanvasPointerUp = useCallback((e: React.PointerEvent) => {
     if (panningRef.current) {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      // Commit to state once
+      setCanvasOffset({ ...canvasOffsetRef.current });
       panningRef.current = null;
       setIsPanning(false);
     }
@@ -469,6 +521,7 @@ export default function VideoGrid({
     >
       <div
         className="canvas-inner"
+        ref={canvasInnerRef}
         style={{ transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)` }}
       >
         {/* SVG connector lines between peer camera and screen share tiles */}
@@ -482,6 +535,8 @@ export default function VideoGrid({
                 x2={`${line.toCx}%`}
                 y2={`${line.toCy}%`}
                 className="canvas-connector-line"
+                data-peer={line.peerId}
+                data-screen={`screen-${line.peerId}`}
               />
             ))}
           </svg>
