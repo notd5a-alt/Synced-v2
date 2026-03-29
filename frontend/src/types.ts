@@ -5,14 +5,16 @@
 export type SignalingState = "closed" | "connecting" | "open" | "reconnecting";
 
 export type SignalingMessage =
-  | { type: "offer"; sdp?: string; candidate?: never }
-  | { type: "answer"; sdp?: string; candidate?: never }
-  | { type: "ice-candidate"; candidate?: RTCIceCandidateInit; sdp?: never }
-  | { type: "peer-joined" }
-  | { type: "peer-disconnected" }
+  | { type: "offer"; sdp?: string; candidate?: never; from?: string; to?: string }
+  | { type: "answer"; sdp?: string; candidate?: never; from?: string; to?: string }
+  | { type: "ice-candidate"; candidate?: RTCIceCandidateInit; sdp?: never; from?: string; to?: string }
+  | { type: "peer-joined"; peerId: string }
+  | { type: "peer-disconnected"; peerId: string }
+  | { type: "assigned-id"; peerId: string }
+  | { type: "room-state"; peers: string[] }
   | { type: "ping" }
   | { type: "pong" }
-  | { type: "screen-sharing"; active: boolean; trackId?: string };
+  | { type: "screen-sharing"; active: boolean; trackId?: string; from?: string; to?: string };
 
 export interface SignalingHook {
   connect: () => void;
@@ -20,6 +22,8 @@ export interface SignalingHook {
   disconnect: () => void;
   onMessage: (handler: (msg: SignalingMessage) => void) => void;
   state: SignalingState;
+  peerId: string | null;
+  roomPeers: string[];
   debugLog: string[];
   addLog: (msg: string) => void;
   reconnectAttempt: number;
@@ -55,7 +59,8 @@ export interface ChatMessage {
   id: string;
   content: string;
   timestamp: number;
-  from: "you" | "peer";
+  /** "you" for local messages, peerId string for remote messages */
+  from: string;
   reactions: Record<string, string[]>;
 }
 
@@ -66,7 +71,10 @@ export type DataChannelMessage =
   | { type: "reaction"; msgId: string; emoji: string }
   | { type: "read"; upTo: string }
   | { type: "typing"; isTyping: boolean }
-  | { type: "presence"; status: PresenceStatus };
+  | { type: "presence"; status: PresenceStatus }
+  | { type: "audio-state"; muted: boolean; deafened: boolean }
+  | { type: "selective-mute"; muted: boolean }
+  | { type: "display-name"; name: string };
 
 // --- File transfer ---
 

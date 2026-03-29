@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import type { SignalingState } from "../types";
 
 const SPINNER_CHARS = ["|", "/", "-", "\\"];
+const MAX_PEERS = 8;
 
 interface LobbyProps {
   isHost: boolean;
@@ -13,6 +14,10 @@ interface LobbyProps {
   timeoutExpired: boolean;
   reconnectAttempt: number;
   maxReconnectAttempts: number;
+  peerCount: number;
+  roomPeers: string[];
+  localPeerId: string | null;
+  displayName: string;
   onRetry: () => void;
   onCancel: () => void;
 }
@@ -27,6 +32,10 @@ export default function Lobby({
   timeoutExpired,
   reconnectAttempt,
   maxReconnectAttempts,
+  peerCount,
+  roomPeers,
+  localPeerId,
+  displayName,
   onRetry,
   onCancel,
 }: LobbyProps) {
@@ -53,6 +62,9 @@ export default function Lobby({
     });
   };
 
+  // Total participants = self + connected peers
+  const totalParticipants = 1 + peerCount;
+
   const status = timeoutExpired
     ? "Connection timed out."
     : connectionState === "connected"
@@ -62,7 +74,9 @@ export default function Lobby({
     : signalingState === "reconnecting"
     ? `Reconnecting to server (${reconnectAttempt}/${maxReconnectAttempts})...`
     : signalingState === "open"
-    ? "Waiting for peer..."
+    ? peerCount === 0
+      ? "Waiting for peers..."
+      : `${totalParticipants} peer${totalParticipants > 1 ? "s" : ""} in room`
     : signalingState === "connecting"
     ? "Connecting to server..."
     : "Initializing...";
@@ -81,6 +95,27 @@ export default function Lobby({
       )}
 
       <p className="status-text">{status}</p>
+
+      {/* Peer list */}
+      {signalingState === "open" && (
+        <div className="lobby-peers">
+          <div className="lobby-peers-header">
+            {totalParticipants} / {MAX_PEERS} peers
+          </div>
+          <div className="lobby-peers-list">
+            {localPeerId && (
+              <div className="lobby-peer-item you">
+                {displayName || localPeerId.slice(0, 8)} (you)
+              </div>
+            )}
+            {roomPeers.map((id) => (
+              <div key={id} className="lobby-peer-item">
+                {id.slice(0, 8)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {timeoutExpired ? (
         <div className="lobby-actions">

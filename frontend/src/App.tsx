@@ -2,10 +2,10 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import useSignaling from "./hooks/useSignaling";
 import useWebRTC from "./hooks/useWebRTC";
 import useConnectionMonitor from "./hooks/useConnectionMonitor";
-import useDataChannel from "./hooks/useDataChannel";
-import useFileTransfer from "./hooks/useFileTransfer";
+import useMultiChat from "./hooks/useMultiChat";
+import useMultiFileTransfer from "./hooks/useMultiFileTransfer";
 import useNoiseSuppression, { preloadRnnoise } from "./hooks/useNoiseSuppression";
-import useVAD from "./hooks/useVAD";
+import useMultiVAD from "./hooks/useMultiVAD";
 import useTheme from "./hooks/useTheme";
 import useAudioDevices from "./hooks/useAudioDevices";
 import useMicLevel from "./hooks/useMicLevel";
@@ -34,19 +34,23 @@ export default function App() {
   const [roomError, setRoomError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [deafened, setDeafened] = useState(false);
+  const [locallyMutedPeers, setLocallyMutedPeers] = useState<Set<string>>(new Set());
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [showThemePanel, setShowThemePanel] = useState(false);
+  const [displayName, setDisplayName] = useState(
+    () => localStorage.getItem("synced-display-name") || "",
+  );
   const sigConnectedRef = useRef(false);
   const nsAutoEnabledRef = useRef(false);
 
   const signaling = useSignaling(sigUrl);
   const isHost = mode === "host";
-  const webrtc = useWebRTC(signaling, isHost);
+  const webrtc = useWebRTC(signaling);
   const theme = useTheme();
-  const monitor = useConnectionMonitor(webrtc.pcRef, signaling.state, webrtc.connectionState);
-  const chat = useDataChannel(webrtc.chatChannel, webrtc.hmacKey);
-  const files = useFileTransfer(webrtc.fileChannel, webrtc.hmacKey);
-  const vad = useVAD(webrtc.localStream, webrtc.remoteStream);
+  const monitor = useConnectionMonitor(webrtc.peers, signaling.state);
+  const chat = useMultiChat(webrtc.peers);
+  const files = useMultiFileTransfer(webrtc.peers);
+  const vad = useMultiVAD(webrtc.localStream, webrtc.peers);
   const remoteAudioRef = useRef<HTMLVideoElement | null>(null);
   const persistentAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioDevices = useAudioDevices(
@@ -59,24 +63,13 @@ export default function App() {
   const micLevel = useMicLevel(webrtc.localStream);
   const noiseSuppression = useNoiseSuppression();
 
-  // Keep persistent audio element in sync with remote stream so call audio
-  // continues playing when the user switches to Chat or Files tabs.
-  // When localStream is null (call ended or not started), clear srcObject
-  // so audio from the other peer stops immediately.
+  // Keep legacy persistent audio element in sync for useAudioDevices setSinkId.
+  // Actual multi-peer audio is handled by PeerAudio components.
   useEffect(() => {
     if (persistentAudioRef.current) {
       persistentAudioRef.current.srcObject = webrtc.localStream ? webrtc.remoteStream : null;
     }
   }, [webrtc.localStream, webrtc.remoteStream, webrtc.streamRevision]);
-
-  // Transition to session once WebRTC connects
-  useEffect(() => {
-    if (webrtc.connectionState === "connected" && screen === "lobby") {
-      changeScreen("session");
-      setFingerprint(webrtc.getFingerprint());
-      playPeerConnected();
-    }
-  }, [webrtc.connectionState, screen, webrtc.getFingerprint, changeScreen]);
 
   // Full state reset — shared by handleDisconnect and peer-disconnect effect.
   // Idempotent: webrtc.cleanup() no-ops if PC is already null.
@@ -101,6 +94,7 @@ export default function App() {
     setActiveTab("chat");
     setLastSeenSeq(0);
     setUnreadDismissed(false);
+    setLocallyMutedPeers(new Set());
   }, [webrtc.cleanup, signaling.disconnect, chat.clearMessages, noiseSuppression.teardown]);
 
   // Animated screen transition — exit current screen, then enter the next
@@ -116,18 +110,47 @@ export default function App() {
     }, 150);
   }, [screen]);
 
-  // Handle peer disconnect during session
+  // Transition to session once any peer connects
+  const prevPeerCountRef = useRef(0);
   useEffect(() => {
-    if (screen === "session") {
-      if (
-        (webrtc.connectionState === "disconnected" && monitor.recoveryFailed) ||
-        webrtc.connectionState === "new"
-      ) {
+    if (webrtc.peerCount > 0 && screen === "lobby") {
+      changeScreen("session");
+      setFingerprint(webrtc.getFingerprint());
+      playPeerConnected();
+    }
+    // Play sound when a new peer joins mid-session
+    if (screen === "session" && webrtc.peerCount > prevPeerCountRef.current && prevPeerCountRef.current > 0) {
+      playPeerConnected();
+    }
+    // Play sound when a peer leaves (but session continues if others remain)
+    if (screen === "session" && webrtc.peerCount < prevPeerCountRef.current && webrtc.peerCount > 0) {
+      playPeerDisconnected();
+    }
+    prevPeerCountRef.current = webrtc.peerCount;
+  }, [webrtc.peerCount, screen, webrtc.getFingerprint, changeScreen]);
+
+  // Handle all peers gone during session — return to home
+  useEffect(() => {
+    if (screen === "session" && webrtc.peerCount === 0) {
+      // All peers disconnected — only reset if we were previously connected
+      // (prevPeerCountRef > 0 means we had peers, now they're all gone)
+      if (prevPeerCountRef.current > 0 || webrtc.connectionState === "new") {
         playPeerDisconnected();
         fullReset();
       }
     }
-  }, [webrtc.connectionState, screen, monitor.recoveryFailed, fullReset]);
+  }, [webrtc.peerCount, webrtc.connectionState, screen, fullReset]);
+
+  // Send display name to all peers when peer count changes (new peer joined)
+  const displayNameRef = useRef(displayName);
+  displayNameRef.current = displayName;
+  useEffect(() => {
+    if (webrtc.peerCount > 0 && displayNameRef.current) {
+      // Small delay to ensure data channels are open
+      const t = setTimeout(() => chat.sendDisplayName(displayNameRef.current), 500);
+      return () => clearTimeout(t);
+    }
+  }, [webrtc.peerCount, chat.sendDisplayName]);
 
   const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
 
@@ -169,7 +192,7 @@ export default function App() {
       if (!res.ok) throw new Error("Server at capacity");
       const { room_code, token } = await res.json();
       setRoomCode(room_code);
-      const wsUrl = `${getWsBaseUrl()}/ws/${room_code}?role=host&token=${encodeURIComponent(token)}`;
+      const wsUrl = `${getWsBaseUrl()}/ws/${room_code}?token=${encodeURIComponent(token)}`;
       setSigUrl(wsUrl);
       changeScreen("lobby");
     } catch (err) {
@@ -189,7 +212,7 @@ export default function App() {
     // Backward compat: if contains ":", treat as IP:port (old direct-connect flow)
     if (upper.includes(":")) {
       const proto = upper === window.location.host ? wsProto : "ws";
-      setSigUrl(`${proto}://${upper}/ws?role=join`);
+      setSigUrl(`${proto}://${upper}/ws`);
       changeScreen("lobby");
       return;
     }
@@ -223,7 +246,7 @@ export default function App() {
     }
 
     setRoomCode(upper);
-    setSigUrl(`${getWsBaseUrl()}/ws/${upper}?role=join&token=${encodeURIComponent(roomToken)}`);
+    setSigUrl(`${getWsBaseUrl()}/ws/${upper}?token=${encodeURIComponent(roomToken)}`);
     changeScreen("lobby");
   }, [fullReset, wsProto, changeScreen]);
 
@@ -255,9 +278,14 @@ export default function App() {
   }, [signaling.state, webrtc.init, signaling.addLog]);
 
   // Ringtone logic — plays for both caller (ringback) and receiver (incoming)
-  const hasRemoteTracks = webrtc.remoteStream
-    .getTracks()
-    .some((t) => t.readyState === "live" && !t.muted);
+  // Check all peers for live remote tracks
+  let hasRemoteTracks = false;
+  for (const [, peer] of webrtc.peers) {
+    if (peer.remoteStream.getTracks().some((t) => t.readyState === "live" && !t.muted)) {
+      hasRemoteTracks = true;
+      break;
+    }
+  }
   const wasInCallRef = useRef(false);
   const [callRejected, setCallRejected] = useState(false);
   const peerEverJoinedCallRef = useRef(false);
@@ -462,7 +490,7 @@ export default function App() {
   const screenClass = screenAnim === "exit" ? "screen-exit" : screenAnim === "enter" ? "screen-enter" : "";
 
   if (screen === "home") {
-    return <div className={screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} /></div>;
+    return <div className={screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} displayName={displayName} onDisplayNameChange={setDisplayName} /></div>;
   }
 
   if (screen === "lobby") {
@@ -477,6 +505,10 @@ export default function App() {
         timeoutExpired={monitor.timeoutExpired}
         reconnectAttempt={signaling.reconnectAttempt}
         maxReconnectAttempts={signaling.maxReconnectAttempts}
+        peerCount={webrtc.peerCount}
+        roomPeers={signaling.roomPeers}
+        localPeerId={signaling.peerId}
+        displayName={displayName}
         onRetry={handleRetry}
         onCancel={handleDisconnect}
       /></div>
@@ -488,6 +520,9 @@ export default function App() {
       <header className="session-header">
         <img src="/logo.png" alt="Synced" className="header-logo" />
         <span className="brand">{"> "}SYNCED</span>
+        <span className="peer-count" title={`${webrtc.peerCount + 1} participants in room`}>
+          [{webrtc.peerCount + 1}/8]
+        </span>
         {chat.peerPresence && (
           <span className={`presence-indicator ${chat.peerPresence}`} role="status" aria-label={`Peer is ${chat.peerPresence}`}>
             <span className="presence-dot" aria-hidden="true" />
@@ -497,6 +532,20 @@ export default function App() {
         {fingerprint && (
           <span className="fingerprint" title="DTLS fingerprint — verify with your peer">
             {fingerprint.slice(0, 20)}...
+          </span>
+        )}
+        {roomCode && (
+          <span className="room-code-badge" title="Room code — share with peers to join">
+            ROOM: {roomCode}
+            <button
+              className="copy-room-code"
+              onClick={() => {
+                navigator.clipboard.writeText(roomCode);
+              }}
+              title="Copy room code"
+            >
+              ⧉
+            </button>
           </span>
         )}
         <nav className="tabs">
@@ -525,7 +574,7 @@ export default function App() {
           className={`btn small ${showThemePanel ? "active" : ""}`}
           onClick={() => setShowThemePanel((s) => !s)}
         >
-          [ THEME ]
+          [ STYLE ]
         </button>
         <button className="btn small danger" onClick={handleDisconnect}>
           [ DISCONNECT ]
@@ -534,7 +583,7 @@ export default function App() {
 
       {showThemePanel && (
         <div className="theme-panel">
-          <ThemeSelector currentTheme={theme.themeId} onSelect={theme.setTheme} />
+          <ThemeSelector currentTheme={theme.themeId} onSelect={theme.setTheme} currentCanvasBg={theme.canvasBgId} onCanvasBgSelect={theme.setCanvasBg} />
         </div>
       )}
 
@@ -579,9 +628,17 @@ export default function App() {
         </div>
       )}
 
-      {/* Persistent audio element — stays mounted across tab switches so call audio
-           continues regardless of which tab is active. VideoCall's <video> elements
-           are always muted; this is the sole audio output path. */}
+      {/* Persistent audio elements — one per peer, stays mounted across tab switches
+           so call audio continues regardless of which tab is active. VideoGrid's
+           <video> elements are always muted; these are the sole audio output path. */}
+      {webrtc.localStream && Array.from(webrtc.peers.values()).map((peer) => (
+        <PeerAudio
+          key={peer.peerId}
+          stream={peer.remoteStream}
+          muted={deafened || locallyMutedPeers.has(peer.peerId)}
+        />
+      ))}
+      {/* Legacy ref for useAudioDevices setSinkId */}
       <audio
         ref={persistentAudioRef}
         autoPlay
@@ -602,6 +659,7 @@ export default function App() {
             onTyping={chat.sendTyping}
             peerReadUpTo={chat.peerReadUpTo}
             peerTyping={chat.peerTyping}
+            peerNames={chat.peerNames}
           />
           </div>
         )}
@@ -609,13 +667,20 @@ export default function App() {
           <div className="tab-content" key="video">
           <VideoCall
             localStream={webrtc.localStream}
-            remoteStream={webrtc.remoteStream}
-            remoteScreenStream={webrtc.remoteScreenStream}
-            streamRevision={webrtc.streamRevision}
             screenStream={webrtc.screenStream}
+            streamRevision={webrtc.streamRevision}
+            peers={webrtc.peers}
+            peerSpeaking={vad.peerSpeaking}
+            peerNames={chat.peerNames}
             onStartCall={webrtc.startCall}
             onEndCall={webrtc.endCall}
-            onToggleAudio={webrtc.toggleAudio}
+            onToggleAudio={() => {
+              webrtc.toggleAudio();
+              // Broadcast new mute state — after toggle, track.enabled is the new state
+              const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
+              const muted = track ? !track.enabled : true;
+              chat.sendAudioState(muted, deafened);
+            }}
             onToggleVideo={webrtc.toggleVideo}
             onShareScreen={webrtc.shareScreen}
             onStopScreenShare={webrtc.stopScreenShare}
@@ -640,12 +705,34 @@ export default function App() {
             }}
             stats={monitor.stats}
             localSpeaking={vad.localSpeaking}
-            remoteSpeaking={vad.remoteSpeaking}
             audioDevices={audioDevices}
             micLevel={micLevel}
-            remoteAudioRef={remoteAudioRef}
             deafened={deafened}
-            onToggleDeafen={() => setDeafened(d => !d)}
+            peersAudioState={chat.peersAudioState}
+            peersMutedForMe={chat.peersMutedForMe}
+            mutedForPeers={webrtc.mutedForPeers}
+            onToggleMuteForPeer={async (peerId: string) => {
+              const wasMuted = webrtc.mutedForPeers.has(peerId);
+              await webrtc.toggleMuteForPeer(peerId);
+              chat.sendSelectiveMute(peerId, !wasMuted);
+            }}
+            locallyMutedPeers={locallyMutedPeers}
+            onToggleLocalMutePeer={(peerId: string) => {
+              setLocallyMutedPeers((prev) => {
+                const next = new Set(prev);
+                if (next.has(peerId)) next.delete(peerId);
+                else next.add(peerId);
+                return next;
+              });
+            }}
+            onToggleDeafen={() => {
+              const newDeafened = !deafened;
+              setDeafened(newDeafened);
+              const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
+              const muted = track ? !track.enabled : true;
+              chat.sendAudioState(muted, newDeafened);
+            }}
+            localDisplayName={displayName}
           />
           </div>
         )}
@@ -663,4 +750,13 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+/** Hidden audio element for a single remote peer — keeps audio playing across tab switches. */
+function PeerAudio({ stream, muted }: { stream: MediaStream; muted: boolean }) {
+  const ref = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <audio ref={ref} autoPlay muted={muted} style={{ display: "none" }} />;
 }

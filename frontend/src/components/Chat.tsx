@@ -13,6 +13,7 @@ interface ChatProps {
   onTyping: (isTyping: boolean) => void;
   peerReadUpTo: string | null;
   peerTyping: boolean;
+  peerNames?: Map<string, string>;
 }
 
 export default function Chat({
@@ -25,6 +26,7 @@ export default function Chat({
   onTyping,
   peerReadUpTo,
   peerTyping,
+  peerNames,
 }: ChatProps) {
   const [text, setText] = useState("");
   const [pickerMsgId, setPickerMsgId] = useState<string | null>(null);
@@ -39,7 +41,7 @@ export default function Chat({
 
   // Auto-send read receipts for new peer messages
   useEffect(() => {
-    const lastPeer = [...messages].reverse().find((m) => m.from === "peer");
+    const lastPeer = [...messages].reverse().find((m) => m.from !== "you");
     if (lastPeer && lastPeer.id !== lastReadRef.current) {
       lastReadRef.current = lastPeer.id;
       onMarkRead(lastPeer.id);
@@ -81,13 +83,13 @@ export default function Chat({
           return (
           <div
             key={m.id || i}
-            className={`msg ${m.from}${isNew ? " msg-animate" : ""}`}
+            className={`msg ${m.from === "you" ? "you" : "peer"}${isNew ? " msg-animate" : ""}`}
             onClick={() =>
               setPickerMsgId(pickerMsgId === m.id ? null : m.id)
             }
           >
             <span className="msg-sender">
-              {m.from === "you" ? "> You" : "< Peer"}
+              {m.from === "you" ? "> You" : `< ${peerNames?.get(m.from) || m.from.slice(0, 8)}`}
             </span>
             <span className="msg-text">{m.content}</span>
             <span className="msg-time">

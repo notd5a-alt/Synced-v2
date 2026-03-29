@@ -8,15 +8,21 @@ import {
   type ServerMode,
 } from "../config";
 
+const DISPLAY_NAME_KEY = "synced-display-name";
+
 interface HomeProps {
   onCreateRoom: () => void;
   onJoinRoom: (code: string) => void;
   roomError: string | null;
   themeId: string;
   onThemeChange: (id: string) => void;
+  canvasBgId: string;
+  onCanvasBgChange: (id: string) => void;
+  displayName: string;
+  onDisplayNameChange: (name: string) => void;
 }
 
-export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onThemeChange }: HomeProps) {
+export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onThemeChange, canvasBgId, onCanvasBgChange, displayName, onDisplayNameChange }: HomeProps) {
   const [joinCode, setJoinCode] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [serverMode, setServerModeState] = useState<ServerMode>(getServerMode);
@@ -33,6 +39,19 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
       <p className="subtitle">Encrypted peer-to-peer communication. No accounts. No traces.</p>
 
       <div className="home-actions">
+        <input
+          type="text"
+          className="name-input"
+          placeholder="Your name"
+          value={displayName}
+          onChange={(e) => {
+            const name = e.target.value.slice(0, 32);
+            onDisplayNameChange(name);
+            localStorage.setItem(DISPLAY_NAME_KEY, name);
+          }}
+          maxLength={32}
+        />
+
         <button className="btn primary" onClick={onCreateRoom}>
           Create Room
         </button>
@@ -101,7 +120,7 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
         </div>
       )}
 
-      <ThemeSelector currentTheme={themeId} onSelect={onThemeChange} />
+      <ThemeSelector currentTheme={themeId} onSelect={onThemeChange} currentCanvasBg={canvasBgId} onCanvasBgSelect={onCanvasBgChange} />
     </div>
   );
 }

@@ -25,6 +25,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(71, 71, 71, 0.2)",
       "--accent": "#3b82f6",
       "--success": "#4ade80",
+      "--canvas-dot": "rgba(255, 255, 255, 0.08)",
     },
   },
   {
@@ -44,6 +45,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(51, 255, 51, 0.1)",
       "--accent": "#66ff66",
       "--success": "#33ff33",
+      "--canvas-dot": "rgba(51, 255, 51, 0.08)",
     },
   },
   {
@@ -63,6 +65,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(255, 176, 0, 0.1)",
       "--accent": "#ffc233",
       "--success": "#ffb000",
+      "--canvas-dot": "rgba(255, 176, 0, 0.08)",
     },
   },
   {
@@ -82,6 +85,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(180, 0, 255, 0.15)",
       "--accent": "#b400ff",
       "--success": "#00ff88",
+      "--canvas-dot": "rgba(180, 0, 255, 0.1)",
     },
   },
   {
@@ -101,6 +105,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(100, 180, 255, 0.12)",
       "--accent": "#64b5f6",
       "--success": "#4ade80",
+      "--canvas-dot": "rgba(100, 180, 255, 0.1)",
     },
   },
   {
@@ -120,6 +125,7 @@ export const themes: ThemeDefinition[] = [
       "--ghost-border": "rgba(255, 50, 50, 0.12)",
       "--accent": "#ff4040",
       "--success": "#ff8080",
+      "--canvas-dot": "rgba(255, 50, 50, 0.08)",
     },
   },
   {
@@ -128,23 +134,122 @@ export const themes: ThemeDefinition[] = [
     scanlines: false,
     vars: {
       "--bg": "#f0f0f0",
-      "--surface": "#e0e0e0",
+      "--surface": "#ffffff",
       "--surface-low": "#e8e8e8",
       "--surface-highest": "#d0d0d0",
       "--surface-bright": "#c8c8c8",
       "--outline": "#aaaaaa",
       "--text": "#1a1a1a",
       "--text-dim": "rgba(26, 26, 26, 0.5)",
+      "--tile-border": "rgba(0, 0, 0, 0.25)",
       "--error": "#cc0000",
       "--ghost-border": "rgba(0, 0, 0, 0.1)",
       "--accent": "#2563eb",
       "--success": "#16a34a",
+      "--canvas-dot": "rgba(0, 0, 0, 0.1)",
+    },
+  },
+];
+
+// --- Canvas background patterns ---
+
+export interface CanvasBackground {
+  id: string;
+  name: string;
+  css: {
+    backgroundImage: string;
+    backgroundSize: string;
+    backgroundPosition?: string;
+  };
+}
+
+export const canvasBackgrounds: CanvasBackground[] = [
+  {
+    id: "dots",
+    name: "Dots",
+    css: {
+      backgroundImage: "radial-gradient(circle, var(--canvas-dot, rgba(255,255,255,0.08)) 1px, transparent 1px)",
+      backgroundSize: "24px 24px",
+    },
+  },
+  {
+    id: "grid",
+    name: "Grid",
+    css: {
+      backgroundImage:
+        "linear-gradient(var(--canvas-dot, rgba(255,255,255,0.06)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.06)) 1px, transparent 1px)",
+      backgroundSize: "32px 32px",
+    },
+  },
+  {
+    id: "cross",
+    name: "Cross",
+    css: {
+      backgroundImage:
+        "radial-gradient(circle, var(--canvas-dot, rgba(255,255,255,0.08)) 1px, transparent 1px), linear-gradient(var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px)",
+      backgroundSize: "32px 32px, 32px 32px, 32px 32px",
+    },
+  },
+  {
+    id: "isometric",
+    name: "Iso",
+    css: {
+      backgroundImage:
+        "linear-gradient(30deg, var(--canvas-dot, rgba(255,255,255,0.05)) 12%, transparent 12.5%, transparent 87%, var(--canvas-dot, rgba(255,255,255,0.05)) 87.5%), linear-gradient(150deg, var(--canvas-dot, rgba(255,255,255,0.05)) 12%, transparent 12.5%, transparent 87%, var(--canvas-dot, rgba(255,255,255,0.05)) 87.5%), linear-gradient(30deg, var(--canvas-dot, rgba(255,255,255,0.05)) 12%, transparent 12.5%, transparent 87%, var(--canvas-dot, rgba(255,255,255,0.05)) 87.5%), linear-gradient(150deg, var(--canvas-dot, rgba(255,255,255,0.05)) 12%, transparent 12.5%, transparent 87%, var(--canvas-dot, rgba(255,255,255,0.05)) 87.5%)",
+      backgroundSize: "40px 70px",
+      backgroundPosition: "0 0, 0 0, 20px 35px, 20px 35px",
+    },
+  },
+  {
+    id: "hex",
+    name: "Hex",
+    css: {
+      backgroundImage:
+        "radial-gradient(circle, var(--canvas-dot, rgba(255,255,255,0.07)) 1.5px, transparent 1.5px), radial-gradient(circle, var(--canvas-dot, rgba(255,255,255,0.07)) 1.5px, transparent 1.5px)",
+      backgroundSize: "40px 69px",
+      backgroundPosition: "0 0, 20px 34.5px",
+    },
+  },
+  {
+    id: "diagonal",
+    name: "Diagonal",
+    css: {
+      backgroundImage:
+        "repeating-linear-gradient(45deg, transparent, transparent 14px, var(--canvas-dot, rgba(255,255,255,0.04)) 14px, var(--canvas-dot, rgba(255,255,255,0.04)) 15px)",
+      backgroundSize: "auto",
+    },
+  },
+  {
+    id: "dense-dots",
+    name: "Dense",
+    css: {
+      backgroundImage: "radial-gradient(circle, var(--canvas-dot, rgba(255,255,255,0.08)) 1px, transparent 1px)",
+      backgroundSize: "12px 12px",
+    },
+  },
+  {
+    id: "blueprint",
+    name: "Blueprint",
+    css: {
+      backgroundImage:
+        "linear-gradient(var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px), linear-gradient(var(--canvas-dot, rgba(255,255,255,0.02)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.02)) 1px, transparent 1px)",
+      backgroundSize: "64px 64px, 64px 64px, 16px 16px, 16px 16px",
+    },
+  },
+  {
+    id: "none",
+    name: "None",
+    css: {
+      backgroundImage: "none",
+      backgroundSize: "auto",
     },
   },
 ];
 
 const STORAGE_KEY = "synced-theme";
+const CANVAS_BG_KEY = "synced-canvas-bg";
 const DEFAULT_THEME = "terminal";
+const DEFAULT_CANVAS_BG = "dots";
 
 function applyTheme(theme: ThemeDefinition) {
   const root = document.documentElement;
@@ -164,6 +269,14 @@ export default function useTheme() {
     }
   });
 
+  const [canvasBgId, setCanvasBgId] = useState<string>(() => {
+    try {
+      return localStorage.getItem(CANVAS_BG_KEY) || DEFAULT_CANVAS_BG;
+    } catch {
+      return DEFAULT_CANVAS_BG;
+    }
+  });
+
   useEffect(() => {
     const theme = themes.find((t) => t.id === themeId) || themes[0];
     applyTheme(theme);
@@ -174,9 +287,26 @@ export default function useTheme() {
     }
   }, [themeId]);
 
+  useEffect(() => {
+    const bg = canvasBackgrounds.find((b) => b.id === canvasBgId) || canvasBackgrounds[0];
+    const root = document.documentElement;
+    root.style.setProperty("--canvas-bg-image", bg.css.backgroundImage);
+    root.style.setProperty("--canvas-bg-size", bg.css.backgroundSize);
+    root.style.setProperty("--canvas-bg-position", bg.css.backgroundPosition || "0 0");
+    try {
+      localStorage.setItem(CANVAS_BG_KEY, canvasBgId);
+    } catch {
+      // storage full or blocked
+    }
+  }, [canvasBgId]);
+
   const setTheme = useCallback((id: string) => {
     setThemeId(id);
   }, []);
 
-  return { themeId, setTheme, themes };
+  const setCanvasBg = useCallback((id: string) => {
+    setCanvasBgId(id);
+  }, []);
+
+  return { themeId, setTheme, themes, canvasBgId, setCanvasBg, canvasBackgrounds };
 }

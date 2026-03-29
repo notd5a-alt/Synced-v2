@@ -2,22 +2,37 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import VideoCall from './VideoCall';
+import type { PeerInfo } from '../hooks/useWebRTC';
+
+// Polyfill ResizeObserver for test environment
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as any;
+}
+
+// Mock AudioVisualizer (uses Web Audio API)
+vi.mock('./AudioVisualizer', () => ({
+  default: () => <div data-testid="audio-visualizer" />,
+}));
 
 const defaultProps = {
-  localStream: null,
-  remoteStream: new MediaStream(),
-  remoteScreenStream: new MediaStream(),
+  localStream: null as MediaStream | null,
+  screenStream: null as MediaStream | null,
   streamRevision: 0,
-  screenStream: null,
+  peers: new Map<string, PeerInfo>(),
+  peerSpeaking: new Map<string, boolean>(),
   onStartCall: vi.fn(),
   onEndCall: vi.fn(),
   onToggleAudio: vi.fn(),
   onToggleVideo: vi.fn(),
   onShareScreen: vi.fn(),
   onStopScreenShare: vi.fn(),
-  callError: null,
-  connectionQuality: null,
-  connectionType: null,
+  callError: null as string | null,
+  connectionQuality: null as any,
+  connectionType: null as any,
   isRecovering: false,
   recoveryFailed: false,
   signalingState: 'open',
@@ -25,14 +40,19 @@ const defaultProps = {
   onToggleAudioProcessing: vi.fn(),
   aiNsEnabled: false,
   onToggleAiNs: vi.fn(),
-  stats: null,
+  stats: null as any,
   localSpeaking: false,
-  remoteSpeaking: false,
   audioDevices: { inputDevices: [], outputDevices: [], selectedInput: '', selectedOutput: '', setInputDevice: vi.fn(), setOutputDevice: vi.fn() } as any,
   micLevel: 0,
-  remoteAudioRef: { current: null },
   deafened: false,
   onToggleDeafen: vi.fn(),
+  peersAudioState: new Map(),
+  mutedForPeers: new Set<string>(),
+  onToggleMuteForPeer: vi.fn(),
+  peersMutedForMe: new Map(),
+  locallyMutedPeers: new Set<string>(),
+  onToggleLocalMutePeer: vi.fn(),
+  peerNames: new Map<string, string>(),
 };
 
 describe('VideoCall', () => {
