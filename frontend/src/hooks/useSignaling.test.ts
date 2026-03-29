@@ -169,7 +169,7 @@ describe("useSignaling", () => {
     });
 
     // Receive messages before registering handler
-    const msg1: SignalingMessage = { type: "peer-joined" };
+    const msg1: SignalingMessage = { type: "peer-joined", peerId: "peer-abc" };
     const msg2: SignalingMessage = { type: "offer", sdp: "v=0\r\n" };
     act(() => {
       MockWebSocket.lastInstance!.simulateMessage(msg1);
@@ -203,13 +203,83 @@ describe("useSignaling", () => {
       result.current.onMessage(handler);
     });
 
-    const msg: SignalingMessage = { type: "peer-joined" };
+    const msg: SignalingMessage = { type: "peer-joined", peerId: "peer-xyz" };
     act(() => {
       MockWebSocket.lastInstance!.simulateMessage(msg);
     });
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(msg);
+  });
+
+  // 7b
+  it("stores peerId from assigned-id message", () => {
+    const { result } = renderHook(() => useSignaling("ws://localhost:9876/ws"));
+
+    act(() => { result.current.connect(); });
+    act(() => { MockWebSocket.lastInstance!.simulateOpen(); });
+
+    expect(result.current.peerId).toBeNull();
+
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "assigned-id", peerId: "my-uuid-123" });
+    });
+
+    expect(result.current.peerId).toBe("my-uuid-123");
+  });
+
+  // 7c
+  it("tracks roomPeers from room-state and peer-joined/peer-disconnected", () => {
+    const { result } = renderHook(() => useSignaling("ws://localhost:9876/ws"));
+
+    act(() => { result.current.connect(); });
+    act(() => { MockWebSocket.lastInstance!.simulateOpen(); });
+
+    // Register handler so messages pass through
+    const handler = vi.fn();
+    act(() => { result.current.onMessage(handler); });
+
+    expect(result.current.roomPeers).toEqual([]);
+
+    // Receive room-state
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "room-state", peers: ["peer-a", "peer-b"] });
+    });
+    expect(result.current.roomPeers).toEqual(["peer-a", "peer-b"]);
+
+    // New peer joins
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "peer-joined", peerId: "peer-c" });
+    });
+    expect(result.current.roomPeers).toEqual(["peer-a", "peer-b", "peer-c"]);
+
+    // Peer disconnects
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "peer-disconnected", peerId: "peer-a" });
+    });
+    expect(result.current.roomPeers).toEqual(["peer-b", "peer-c"]);
+  });
+
+  // 7d
+  it("resets peerId and roomPeers on disconnect", () => {
+    const { result } = renderHook(() => useSignaling("ws://localhost:9876/ws"));
+
+    act(() => { result.current.connect(); });
+    act(() => { MockWebSocket.lastInstance!.simulateOpen(); });
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "assigned-id", peerId: "my-id" });
+    });
+    act(() => {
+      MockWebSocket.lastInstance!.simulateMessage({ type: "room-state", peers: ["other-peer"] });
+    });
+
+    expect(result.current.peerId).toBe("my-id");
+    expect(result.current.roomPeers.length).toBeGreaterThan(0);
+
+    act(() => { result.current.disconnect(); });
+
+    expect(result.current.peerId).toBeNull();
+    expect(result.current.roomPeers).toEqual([]);
   });
 
   // 8

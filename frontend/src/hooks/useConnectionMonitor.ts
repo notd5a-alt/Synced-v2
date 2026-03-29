@@ -1,4 +1,5 @@
-import { useRef, useState, useEffect, useCallback, type MutableRefObject } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import type { PeerInfo } from "./useWebRTC";
 import type { SignalingState, ConnectionQuality, ConnectionType, ConnectionStats } from "../types";
 
 const ICE_RESTART_DELAY = 15000; // wait 15s on "disconnected" before restarting
@@ -28,6 +29,82 @@ const SCREEN_BANDWIDTH_TIERS: Record<ConnectionQuality, BandwidthTier> = {
   critical:  { maxBitrate:   300_000, scaleDown: 2, maxFramerate: 5 },
 };
 
+const QUALITY_RANK: Record<ConnectionQuality, number> = {
+  excellent: 0, good: 1, poor: 2, critical: 3,
+};
+
+// ---------------------------------------------------------------------------
+// Per-peer monitoring state (stored in a ref Map)
+// ---------------------------------------------------------------------------
+interface PeerMonitorState {
+  // ICE restart
+  restartAttempts: number;
+  disconnectTimer: ReturnType<typeof setTimeout> | null;
+  restartTimeout: ReturnType<typeof setTimeout> | null;
+  isRecovering: boolean;
+  recoveryFailed: boolean;
+  // Stats tracking
+  prevBytes: number;
+  prevTimestamp: number;
+  smoothBitrate: number;
+  prevPacketsLost: number;
+  prevPacketsReceived: number;
+  qualityCount: number;
+  candidateQuality: ConnectionQuality | null;
+  quality: ConnectionQuality | null;
+  type: ConnectionType | null;
+  stats: ConnectionStats | null;
+  // State tracking
+  prevConnectionState: RTCPeerConnectionState;
+  applyingParams: boolean;
+}
+
+function createPeerMonitor(): PeerMonitorState {
+  return {
+    restartAttempts: 0,
+    disconnectTimer: null,
+    restartTimeout: null,
+    isRecovering: false,
+    recoveryFailed: false,
+    prevBytes: 0,
+    prevTimestamp: 0,
+    smoothBitrate: 0,
+    prevPacketsLost: 0,
+    prevPacketsReceived: 0,
+    qualityCount: 0,
+    candidateQuality: null,
+    quality: null,
+    type: null,
+    stats: null,
+    // Start as "new" so the first real connectionState triggers a transition
+    prevConnectionState: "new",
+    applyingParams: false,
+  };
+}
+
+function cleanupPeerMonitor(pm: PeerMonitorState) {
+  if (pm.disconnectTimer) clearTimeout(pm.disconnectTimer);
+  if (pm.restartTimeout) clearTimeout(pm.restartTimeout);
+  pm.disconnectTimer = null;
+  pm.restartTimeout = null;
+}
+
+function resetPeerMonitorStats(pm: PeerMonitorState) {
+  pm.prevBytes = 0;
+  pm.prevTimestamp = 0;
+  pm.smoothBitrate = 0;
+  pm.prevPacketsLost = 0;
+  pm.prevPacketsReceived = 0;
+  pm.qualityCount = 0;
+  pm.candidateQuality = null;
+  pm.quality = null;
+  pm.type = null;
+  pm.stats = null;
+}
+
+// ---------------------------------------------------------------------------
+// Exported interface
+// ---------------------------------------------------------------------------
 export interface ConnectionMonitorResult {
   connectionQuality: ConnectionQuality | null;
   connectionType: ConnectionType | null;
@@ -36,311 +113,297 @@ export interface ConnectionMonitorResult {
   recoveryFailed: boolean;
   timeoutExpired: boolean;
   setTimeoutExpired: (value: boolean) => void;
+  peerQualities: Map<string, ConnectionQuality | null>;
 }
 
+// ---------------------------------------------------------------------------
+// Quality classification with dead-zone hysteresis
+// ---------------------------------------------------------------------------
+function classifyQuality(
+  rtt: number,
+  lossPercent: number,
+  current: ConnectionQuality | null,
+): ConnectionQuality {
+  if (current === "good") {
+    if (rtt < 80 && lossPercent < 0.3) return "excellent";
+    if (rtt >= 300 || lossPercent >= 3) return "poor";
+    return "good";
+  } else if (current === "excellent") {
+    if (rtt > 120 || lossPercent > 0.8) return "good";
+    return "excellent";
+  } else if (current === "poor") {
+    if (rtt < 200 && lossPercent < 1.5) return "good";
+    if (rtt >= 600 || lossPercent >= 7) return "critical";
+    return "poor";
+  } else {
+    // current is "critical" or null — standard thresholds
+    if (rtt < 100 && lossPercent < 0.5) return "excellent";
+    if (rtt < 250 && lossPercent < 2) return "good";
+    if (rtt < 500 && lossPercent < 5) return "poor";
+    return "critical";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
 export default function useConnectionMonitor(
-  pcRef: MutableRefObject<RTCPeerConnection | null>,
+  peers: Map<string, PeerInfo>,
   signalingState: SignalingState,
-  connectionState: string
 ): ConnectionMonitorResult {
+  // --- React state (aggregated outputs) ---
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality | null>(null);
   const [connectionType, setConnectionType] = useState<ConnectionType | null>(null);
   const [stats, setStats] = useState<ConnectionStats | null>(null);
   const [isRecovering, setIsRecovering] = useState(false);
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [timeoutExpired, setTimeoutExpired] = useState(false);
+  const [peerQualities, setPeerQualities] = useState<Map<string, ConnectionQuality | null>>(new Map());
 
-  const restartAttemptsRef = useRef(0);
-  const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevBytesRef = useRef(0);
-  const prevTimestampRef = useRef(0);
-  const smoothBitrateRef = useRef(0);
-  // Interval-based packet loss tracking (not cumulative)
-  const prevPacketsLostRef = useRef(0);
-  const prevPacketsReceivedRef = useRef(0);
-  const qualityCountRef = useRef(0); // consecutive samples at candidate quality
-  const candidateQualityRef = useRef<ConnectionQuality | null>(null);
+  // --- Refs ---
+  const monitorsRef = useRef<Map<string, PeerMonitorState>>(new Map());
+  const peersRef = useRef(peers);
+  peersRef.current = peers;
   const signalingStateRef = useRef(signalingState);
   signalingStateRef.current = signalingState;
 
-  const clearTimers = useCallback(() => {
-    if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
-    if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
-    if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-    if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
-    disconnectTimerRef.current = null;
-    timeoutTimerRef.current = null;
-    restartTimeoutRef.current = null;
-    statsIntervalRef.current = null;
-  }, []);
+  const statsIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingRef = useRef(false);
 
-  const attemptRestart = useCallback(() => {
-    const pc = pcRef.current;
-    if (!pc) return;
+  // Derive overall connection state from peers (for timeout logic)
+  const overallConnectionState = (() => {
+    if (peers.size === 0) return "new";
+    let hasConnecting = false;
+    for (const p of peers.values()) {
+      if (p.connectionState === "connected") return "connected";
+      if (p.connectionState === "connecting") hasConnecting = true;
+    }
+    if (hasConnecting) return "connecting";
+    // All peers are disconnected/failed/closed/new
+    for (const p of peers.values()) {
+      if (p.connectionState === "disconnected") return "disconnected";
+    }
+    for (const p of peers.values()) {
+      if (p.connectionState === "failed") return "failed";
+    }
+    return "new";
+  })();
 
-    if (signalingStateRef.current !== "open") {
-      // Can't restart without signaling — will retry when signaling recovers
+  // ----- Per-peer ICE restart -----
+  const attemptPeerRestart = useCallback((peerId: string, pc: RTCPeerConnection) => {
+    const mon = monitorsRef.current.get(peerId);
+    if (!mon) return;
+
+    if (signalingStateRef.current !== "open") return;
+
+    if (mon.restartAttempts >= MAX_RESTART_ATTEMPTS) {
+      mon.isRecovering = false;
+      mon.recoveryFailed = true;
+      recomputeAggregate();
       return;
     }
 
-    if (restartAttemptsRef.current >= MAX_RESTART_ATTEMPTS) {
-      setIsRecovering(false);
-      setRecoveryFailed(true);
-      return;
-    }
+    mon.restartAttempts++;
+    mon.isRecovering = true;
+    recomputeAggregate();
 
-    restartAttemptsRef.current++;
-    setIsRecovering(true);
-    // Clear connection timeout — ICE restart extends the connection lifecycle (H8)
+    // Clear connection timeout
     if (timeoutTimerRef.current) {
       clearTimeout(timeoutTimerRef.current);
       timeoutTimerRef.current = null;
     }
     try {
-      pc.restartIce(); // triggers onnegotiationneeded → new offer with ice-restart
-      // Start a timeout — if restart doesn't produce "connected" in time, try again
-      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-      restartTimeoutRef.current = setTimeout(() => {
-        restartTimeoutRef.current = null;
-        const pc = pcRef.current;
-        if (pc && pc.connectionState !== "connected") {
-          attemptRestart();
+      pc.restartIce();
+      if (mon.restartTimeout) clearTimeout(mon.restartTimeout);
+      mon.restartTimeout = setTimeout(() => {
+        mon.restartTimeout = null;
+        const peer = peersRef.current.get(peerId);
+        if (peer && peer.connectionState !== "connected") {
+          attemptPeerRestart(peerId, peer.pc);
         }
       }, ICE_RESTART_TIMEOUT);
     } catch {
-      // restartIce can fail if connection is already closed
-      setIsRecovering(false);
-      setRecoveryFailed(true);
+      mon.isRecovering = false;
+      mon.recoveryFailed = true;
+      recomputeAggregate();
     }
-  }, [pcRef]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // React to connection state changes
-  useEffect(() => {
-    if (connectionState === "connected") {
-      if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
-      if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
-      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-      disconnectTimerRef.current = null;
-      timeoutTimerRef.current = null;
-      restartTimeoutRef.current = null;
-      restartAttemptsRef.current = 0;
-      setIsRecovering(false);
-      setRecoveryFailed(false);
-      setTimeoutExpired(false);
-    } else if (connectionState === "disconnected") {
-      if (!disconnectTimerRef.current) {
-        disconnectTimerRef.current = setTimeout(() => {
-          disconnectTimerRef.current = null;
-          attemptRestart();
-        }, ICE_RESTART_DELAY);
+  // ----- Aggregate computation -----
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  function recomputeAggregate() {
+    const monitors = monitorsRef.current;
+    let worstQuality: ConnectionQuality | null = null;
+    let worstType: ConnectionType | null = null;
+    let worstStats: ConnectionStats | null = null;
+    let anyRecovering = false;
+    let anyFailed = false;
+    const qualities = new Map<string, ConnectionQuality | null>();
+
+    for (const [id, mon] of monitors) {
+      qualities.set(id, mon.quality);
+      if (mon.isRecovering) anyRecovering = true;
+      if (mon.recoveryFailed) anyFailed = true;
+
+      if (mon.quality != null) {
+        if (worstQuality == null || QUALITY_RANK[mon.quality] > QUALITY_RANK[worstQuality]) {
+          worstQuality = mon.quality;
+          worstType = mon.type;
+          worstStats = mon.stats;
+        }
       }
-    } else if (connectionState === "failed") {
-      if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
-      disconnectTimerRef.current = null;
-      attemptRestart();
-    } else if (connectionState === "closed" || connectionState === "new") {
-      clearTimers();
-      setConnectionQuality(null);
-      setConnectionType(null);
-      setStats(null);
-      setIsRecovering(false);
-      setRecoveryFailed(false);
-      prevBytesRef.current = 0;
-      prevTimestampRef.current = 0;
-      smoothBitrateRef.current = 0;
-      prevPacketsLostRef.current = 0;
-      prevPacketsReceivedRef.current = 0;
-      qualityCountRef.current = 0;
-      candidateQualityRef.current = null;
     }
-  }, [connectionState, attemptRestart, clearTimers]);
 
-  // Connection timeout — only start when actual negotiation begins ("connecting"),
-  // not on "new" which is the idle state before any peer joins
+    setConnectionQuality(worstQuality);
+    setConnectionType(worstType);
+    setStats(worstStats);
+    setIsRecovering(anyRecovering);
+    setRecoveryFailed(anyFailed);
+    setPeerQualities(qualities);
+  }
+
+  // Stable key for peer identity + connection states — drives the sync effect
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const peerStateKey = useMemo(() => {
+    const parts: string[] = [];
+    for (const [id, p] of peers) parts.push(`${id}:${p.connectionState}`);
+    return parts.sort().join(",");
+  }, [peers]);
+
+  // ----- Sync monitors with peers map & handle state transitions -----
   useEffect(() => {
-    if (connectionState === "connecting") {
+    const monitors = monitorsRef.current;
+    const currentPeerIds = new Set(peers.keys());
+
+    // Remove stale monitors
+    for (const [id, mon] of monitors) {
+      if (!currentPeerIds.has(id)) {
+        cleanupPeerMonitor(mon);
+        monitors.delete(id);
+      }
+    }
+
+    // Add new monitors & handle state transitions
+    for (const [id, peer] of peers) {
+      let mon = monitors.get(id);
+      if (!mon) {
+        mon = createPeerMonitor();
+        monitors.set(id, mon);
+      }
+
+      // Detect connection state transitions
+      const prev = mon.prevConnectionState;
+      const curr = peer.connectionState;
+      if (prev !== curr) {
+        mon.prevConnectionState = curr;
+
+        if (curr === "connected") {
+          if (mon.disconnectTimer) clearTimeout(mon.disconnectTimer);
+          if (mon.restartTimeout) clearTimeout(mon.restartTimeout);
+          mon.disconnectTimer = null;
+          mon.restartTimeout = null;
+          mon.restartAttempts = 0;
+          mon.isRecovering = false;
+          mon.recoveryFailed = false;
+        } else if (curr === "disconnected") {
+          if (!mon.disconnectTimer) {
+            const capturedId = id;
+            mon.disconnectTimer = setTimeout(() => {
+              mon!.disconnectTimer = null;
+              const p = peersRef.current.get(capturedId);
+              if (p) attemptPeerRestart(capturedId, p.pc);
+            }, ICE_RESTART_DELAY);
+          }
+        } else if (curr === "failed") {
+          if (mon.disconnectTimer) clearTimeout(mon.disconnectTimer);
+          mon.disconnectTimer = null;
+          attemptPeerRestart(id, peer.pc);
+        } else if (curr === "closed" || curr === "new") {
+          cleanupPeerMonitor(mon);
+          resetPeerMonitorStats(mon);
+          mon.restartAttempts = 0;
+          mon.isRecovering = false;
+          mon.recoveryFailed = false;
+        }
+      }
+    }
+
+    recomputeAggregate();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peerStateKey]); // only re-run when peers join/leave or change connectionState
+
+  // ----- Connection timeout -----
+  useEffect(() => {
+    if (overallConnectionState === "connecting") {
       if (!timeoutTimerRef.current) {
         timeoutTimerRef.current = setTimeout(() => {
           timeoutTimerRef.current = null;
-          if (pcRef.current && pcRef.current.connectionState !== "connected") {
+          // Check if still no connected peers
+          let anyConnected = false;
+          for (const p of peersRef.current.values()) {
+            if (p.connectionState === "connected") { anyConnected = true; break; }
+          }
+          if (!anyConnected) {
             setTimeoutExpired(true);
           }
         }, CONNECTION_TIMEOUT);
       }
     }
-    if (connectionState === "connected") {
+    if (overallConnectionState === "connected") {
       if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
       timeoutTimerRef.current = null;
+      setTimeoutExpired(false);
     }
-  }, [connectionState, pcRef]);
-
-  // Retry ICE restart when signaling recovers
-  useEffect(() => {
-    if (signalingState === "open" && isRecovering) {
-      attemptRestart();
+    if (overallConnectionState === "new") {
+      if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
+      timeoutTimerRef.current = null;
+      // Full reset
+      setConnectionQuality(null);
+      setConnectionType(null);
+      setStats(null);
+      setIsRecovering(false);
+      setRecoveryFailed(false);
     }
-  }, [signalingState, isRecovering, attemptRestart]);
+  }, [overallConnectionState]);
 
-  // Quality monitoring via getStats()
-  const pollingRef = useRef(false); // guard against overlapping polls (C5)
+  // ----- Retry ICE restart when signaling recovers -----
   useEffect(() => {
-    if (connectionState !== "connected") {
+    if (signalingState !== "open") return;
+    for (const [id, mon] of monitorsRef.current) {
+      if (mon.isRecovering) {
+        const peer = peersRef.current.get(id);
+        if (peer) attemptPeerRestart(id, peer.pc);
+      }
+    }
+  }, [signalingState, attemptPeerRestart]);
+
+  // ----- Stats polling (iterates all connected peers) -----
+  useEffect(() => {
+    const hasConnected = overallConnectionState === "connected";
+    if (!hasConnected) {
       if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
       statsIntervalRef.current = null;
       return;
     }
 
-    const pollStats = async () => {
-      const pc = pcRef.current;
-      if (!pc) return;
-      // Skip if previous poll is still running (C5) — prevents hysteresis corruption
+    const pollAllPeers = async () => {
       if (pollingRef.current) return;
       pollingRef.current = true;
       try {
-        const report = await pc.getStats();
-        let rtt: number | null = null;
-        // Track video packet loss separately — audio FEC makes audio loss tolerable,
-        // so only video loss should trigger quality downgrades (M4)
-        let videoPacketsLost = 0;
-        let videoPacketsReceived = 0;
-        let totalBytesReceived = 0;
-
-        let activePair: any = null;
-        let codec: string | null = null;
-        let resolution: string | null = null;
-        let fps: number | null = null;
-
-        report.forEach((stat) => {
-          if (stat.type === "candidate-pair" && (stat as RTCIceCandidatePairStats).state === "succeeded") {
-            const pairStat = stat as RTCIceCandidatePairStats;
-            rtt = pairStat.currentRoundTripTime != null
-              ? pairStat.currentRoundTripTime * 1000
-              : rtt;
-            activePair = pairStat;
-          }
-          if (stat.type === "inbound-rtp") {
-            const rtpStat = stat as RTCInboundRtpStreamStats;
-            // Accumulate bytes from both audio and video for bitrate
-            totalBytesReceived += rtpStat.bytesReceived || 0;
-            // Only track video packet loss for quality classification (M4)
-            // Audio FEC handles audio loss effectively, so it shouldn't downgrade quality
-            if (rtpStat.kind === "video") {
-              videoPacketsLost += rtpStat.packetsLost || 0;
-              videoPacketsReceived += rtpStat.packetsReceived || 0;
-            }
-
-            if (rtpStat.kind === "video") {
-              const videoStat = rtpStat as any;
-              if (videoStat.frameWidth && videoStat.frameHeight) {
-                resolution = `${videoStat.frameWidth}x${videoStat.frameHeight}`;
-              }
-              if (videoStat.framesPerSecond) {
-                fps = Math.round(videoStat.framesPerSecond);
-              }
-              if (videoStat.codecId) {
-                const codecStat = report.get(videoStat.codecId);
-                if (codecStat?.type === "codec") {
-                  const mimeType = (codecStat as any).mimeType as string | undefined;
-                  if (mimeType) {
-                    codec = mimeType.replace(/^video\//, "").replace(/^audio\//, "");
-                  }
-                }
-              }
-            }
-          }
-        });
-
-        // Detect relay vs direct from active candidate pair
-        if (activePair) {
-          const local = report.get(activePair.localCandidateId);
-          const remote = report.get(activePair.remoteCandidateId);
-          const isRelay =
-            (local as any)?.candidateType === "relay" ||
-            (remote as any)?.candidateType === "relay";
-          setConnectionType(isRelay ? "relay" : "direct");
+        for (const [id, peer] of peersRef.current) {
+          if (peer.connectionState !== "connected") continue;
+          const mon = monitorsRef.current.get(id);
+          if (!mon) continue;
+          await pollPeerStats(peer.pc, mon);
         }
-
-        // Compute interval-based video packet loss (not cumulative) for responsive quality signal
-        const intervalLost = videoPacketsLost - prevPacketsLostRef.current;
-        const intervalReceived = videoPacketsReceived - prevPacketsReceivedRef.current;
-        const intervalTotal = intervalReceived + intervalLost;
-        const lossPercent = intervalTotal > 0 ? (intervalLost / intervalTotal) * 100 : 0;
-        prevPacketsLostRef.current = videoPacketsLost;
-        prevPacketsReceivedRef.current = videoPacketsReceived;
-
-        const now = performance.now();
-        const instantBitrate = prevTimestampRef.current > 0
-          ? ((totalBytesReceived - prevBytesRef.current) * 8) / ((now - prevTimestampRef.current) / 1000)
-          : 0;
-        prevBytesRef.current = totalBytesReceived;
-        prevTimestampRef.current = now;
-
-        // EWMA smoothing (α=0.3) to reduce jitter in bitrate readings
-        const alpha = 0.3;
-        smoothBitrateRef.current = smoothBitrateRef.current === 0
-          ? instantBitrate
-          : alpha * instantBitrate + (1 - alpha) * smoothBitrateRef.current;
-        const bitrate = smoothBitrateRef.current;
-
-        setStats({ rtt, packetLoss: lossPercent, bitrate, codec, resolution, fps });
-
-        // Quality classification with dead-zone hysteresis (M3)
-        // Uses asymmetric thresholds: tighter to upgrade, looser to downgrade.
-        // This prevents oscillation at boundaries (e.g., RTT 95↔105ms).
-        if (rtt != null) {
-          const current = connectionQuality;
-          let rawQuality: ConnectionQuality;
-
-          if (current === "good") {
-            // To upgrade to excellent: need RTT < 80 (not 100) — tighter
-            // To downgrade to poor: need RTT > 300 (not 250) — looser
-            if (rtt < 80 && lossPercent < 0.3) rawQuality = "excellent";
-            else if (rtt >= 300 || lossPercent >= 3) rawQuality = "poor";
-            else rawQuality = "good";
-          } else if (current === "excellent") {
-            // To downgrade to good: need RTT > 120 (not 100) — dead zone
-            if (rtt > 120 || lossPercent > 0.8) rawQuality = "good";
-            else rawQuality = "excellent";
-          } else if (current === "poor") {
-            // To upgrade to good: need RTT < 200
-            // To downgrade to critical: need RTT > 600
-            if (rtt < 200 && lossPercent < 1.5) rawQuality = "good";
-            else if (rtt >= 600 || lossPercent >= 7) rawQuality = "critical";
-            else rawQuality = "poor";
-          } else {
-            // current is "critical" or null — use standard thresholds
-            if (rtt < 100 && lossPercent < 0.5) rawQuality = "excellent";
-            else if (rtt < 250 && lossPercent < 2) rawQuality = "good";
-            else if (rtt < 500 && lossPercent < 5) rawQuality = "poor";
-            else rawQuality = "critical";
-          }
-
-          if (rawQuality === candidateQualityRef.current) {
-            qualityCountRef.current++;
-          } else {
-            candidateQualityRef.current = rawQuality;
-            qualityCountRef.current = 1;
-          }
-
-          // Apply immediately on first reading or after 2 consecutive samples
-          if (current === null || qualityCountRef.current >= 2) {
-            if (rawQuality !== current) {
-              setConnectionQuality(rawQuality);
-            }
-          }
-        }
-      } catch {
-        // Stats not available
+        recomputeAggregate();
       } finally {
         pollingRef.current = false;
       }
     };
 
-    // Fast initial burst: poll at 500ms for first 3 samples to establish
-    // quality tier quickly (~1.5s instead of ~6s), then switch to normal 3s
     const FAST_INTERVAL = 500;
     const FAST_POLLS = 3;
     let pollCount = 0;
@@ -348,75 +411,68 @@ export default function useConnectionMonitor(
     const schedulePoll = () => {
       const interval = pollCount < FAST_POLLS ? FAST_INTERVAL : STATS_INTERVAL;
       statsIntervalRef.current = setTimeout(() => {
-        pollStats().then(() => {
+        pollAllPeers().then(() => {
           pollCount++;
           schedulePoll();
         });
       }, interval);
     };
 
-    pollStats().then(() => { pollCount++; schedulePoll(); });
+    pollAllPeers().then(() => { pollCount++; schedulePoll(); });
 
     return () => {
       if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
       statsIntervalRef.current = null;
     };
-  }, [connectionState, pcRef]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overallConnectionState]);
 
-  // Bandwidth adaptation — adjust video encoding when quality changes
-  // Also re-applies when stats update (every 3s) to catch newly-added video senders
-  const applyingParamsRef = useRef(false);
-  const lastTierRef = useRef<BandwidthTier | null>(null);
+  // ----- Bandwidth adaptation (all peers) -----
   useEffect(() => {
     if (!connectionQuality) return;
-    const pc = pcRef.current;
-    if (!pc) return;
 
-    // Skip if a previous update is still in flight to prevent concurrent setParameters()
-    if (applyingParamsRef.current) return;
-
-    const applyParams = async () => {
-      applyingParamsRef.current = true;
-      try {
-        const senders = pc.getSenders();
-        for (const sender of senders) {
-          if (sender.track?.kind !== "video") continue;
-          // Use higher bitrate tiers for screen share content
-          // Detect screen share via contentHint which we control (set in shareScreen).
-          // Don't rely on track.label which is browser-specific and unreliable (B7).
-          const hint = sender.track.contentHint;
-          const isScreenShare = hint === "detail" || hint === "text";
-          const tier = isScreenShare
-            ? SCREEN_BANDWIDTH_TIERS[connectionQuality]
-            : BANDWIDTH_TIERS[connectionQuality];
-          if (!tier) continue;
-          lastTierRef.current = tier;
-          const params = sender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) continue;
-          // Skip if already at correct bitrate (avoids redundant setParameters calls)
-          if (params.encodings[0].maxBitrate === tier.maxBitrate) continue;
-          params.encodings[0].maxBitrate = tier.maxBitrate;
-          params.encodings[0].scaleResolutionDownBy = tier.scaleDown;
-          params.encodings[0].maxFramerate = tier.maxFramerate;
-          // Prefer dropping resolution over framerate — users perceive
-          // low framerate as "choppy" which is worse than "blurry"
-          (params.encodings[0] as any).degradationPreference = "maintain-framerate";
-          try {
-            await sender.setParameters(params);
-          } catch { /* encoding params not supported */ }
+    const applyAllPeers = async () => {
+      for (const [id, peer] of peersRef.current) {
+        const mon = monitorsRef.current.get(id);
+        if (!mon || mon.applyingParams) continue;
+        mon.applyingParams = true;
+        try {
+          for (const sender of peer.pc.getSenders()) {
+            if (sender.track?.kind !== "video") continue;
+            const hint = sender.track.contentHint;
+            const isScreenShare = hint === "detail" || hint === "text";
+            const tier = isScreenShare
+              ? SCREEN_BANDWIDTH_TIERS[connectionQuality]
+              : BANDWIDTH_TIERS[connectionQuality];
+            if (!tier) continue;
+            const params = sender.getParameters();
+            if (!params.encodings?.length) continue;
+            if (params.encodings[0].maxBitrate === tier.maxBitrate) continue;
+            params.encodings[0].maxBitrate = tier.maxBitrate;
+            params.encodings[0].scaleResolutionDownBy = tier.scaleDown;
+            params.encodings[0].maxFramerate = tier.maxFramerate;
+            (params.encodings[0] as any).degradationPreference = "maintain-framerate";
+            try { await sender.setParameters(params); } catch { /* not supported */ }
+          }
+        } finally {
+          mon.applyingParams = false;
         }
-      } finally {
-        applyingParamsRef.current = false;
       }
     };
 
-    applyParams();
-  }, [connectionQuality, pcRef]); // H6: removed stats — only quality changes trigger adaptation
+    applyAllPeers();
+  }, [connectionQuality]);
 
-  // Cleanup on unmount
+  // ----- Cleanup on unmount -----
   useEffect(() => {
-    return clearTimers;
-  }, [clearTimers]);
+    return () => {
+      for (const mon of monitorsRef.current.values()) {
+        cleanupPeerMonitor(mon);
+      }
+      if (statsIntervalRef.current) clearTimeout(statsIntervalRef.current);
+      if (timeoutTimerRef.current) clearTimeout(timeoutTimerRef.current);
+    };
+  }, []);
 
   return {
     connectionQuality,
@@ -426,5 +482,109 @@ export default function useConnectionMonitor(
     recoveryFailed,
     timeoutExpired,
     setTimeoutExpired,
+    peerQualities,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Poll stats for a single peer's PC and update its monitor state
+// ---------------------------------------------------------------------------
+async function pollPeerStats(pc: RTCPeerConnection, mon: PeerMonitorState) {
+  try {
+    const report = await pc.getStats();
+    let rtt: number | null = null;
+    let videoPacketsLost = 0;
+    let videoPacketsReceived = 0;
+    let totalBytesReceived = 0;
+    let activePair: any = null;
+    let codec: string | null = null;
+    let resolution: string | null = null;
+    let fps: number | null = null;
+
+    report.forEach((stat) => {
+      if (stat.type === "candidate-pair" && (stat as RTCIceCandidatePairStats).state === "succeeded") {
+        const pairStat = stat as RTCIceCandidatePairStats;
+        rtt = pairStat.currentRoundTripTime != null
+          ? pairStat.currentRoundTripTime * 1000
+          : rtt;
+        activePair = pairStat;
+      }
+      if (stat.type === "inbound-rtp") {
+        const rtpStat = stat as RTCInboundRtpStreamStats;
+        totalBytesReceived += rtpStat.bytesReceived || 0;
+        if (rtpStat.kind === "video") {
+          videoPacketsLost += rtpStat.packetsLost || 0;
+          videoPacketsReceived += rtpStat.packetsReceived || 0;
+          const videoStat = rtpStat as any;
+          if (videoStat.frameWidth && videoStat.frameHeight) {
+            resolution = `${videoStat.frameWidth}x${videoStat.frameHeight}`;
+          }
+          if (videoStat.framesPerSecond) {
+            fps = Math.round(videoStat.framesPerSecond);
+          }
+          if (videoStat.codecId) {
+            const codecStat = report.get(videoStat.codecId);
+            if (codecStat?.type === "codec") {
+              const mimeType = (codecStat as any).mimeType as string | undefined;
+              if (mimeType) {
+                codec = mimeType.replace(/^video\//, "").replace(/^audio\//, "");
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Connection type
+    if (activePair) {
+      const local = report.get(activePair.localCandidateId);
+      const remote = report.get(activePair.remoteCandidateId);
+      const isRelay =
+        (local as any)?.candidateType === "relay" ||
+        (remote as any)?.candidateType === "relay";
+      mon.type = isRelay ? "relay" : "direct";
+    }
+
+    // Interval-based packet loss
+    const intervalLost = videoPacketsLost - mon.prevPacketsLost;
+    const intervalReceived = videoPacketsReceived - mon.prevPacketsReceived;
+    const intervalTotal = intervalReceived + intervalLost;
+    const lossPercent = intervalTotal > 0 ? (intervalLost / intervalTotal) * 100 : 0;
+    mon.prevPacketsLost = videoPacketsLost;
+    mon.prevPacketsReceived = videoPacketsReceived;
+
+    // Bitrate with EWMA smoothing
+    const now = performance.now();
+    const instantBitrate = mon.prevTimestamp > 0
+      ? ((totalBytesReceived - mon.prevBytes) * 8) / ((now - mon.prevTimestamp) / 1000)
+      : 0;
+    mon.prevBytes = totalBytesReceived;
+    mon.prevTimestamp = now;
+    const alpha = 0.3;
+    mon.smoothBitrate = mon.smoothBitrate === 0
+      ? instantBitrate
+      : alpha * instantBitrate + (1 - alpha) * mon.smoothBitrate;
+
+    mon.stats = { rtt, packetLoss: lossPercent, bitrate: mon.smoothBitrate, codec, resolution, fps };
+
+    // Quality classification with hysteresis
+    if (rtt != null) {
+      const rawQuality = classifyQuality(rtt, lossPercent, mon.quality);
+
+      if (rawQuality === mon.candidateQuality) {
+        mon.qualityCount++;
+      } else {
+        mon.candidateQuality = rawQuality;
+        mon.qualityCount = 1;
+      }
+
+      if (mon.quality === null || mon.qualityCount >= 2) {
+        if (rawQuality !== mon.quality) {
+          mon.quality = rawQuality;
+        }
+      }
+    }
+  } catch {
+    // Stats not available
+  }
 }

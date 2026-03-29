@@ -164,11 +164,12 @@ async def info():
 
 
 @app.post("/api/rooms")
-async def create_room():
+async def create_room(max_peers: int = 8):
     """Create a new room and return a short room code + token."""
+    max_peers = max(2, min(max_peers, 8))  # clamp to [2, 8]
     try:
-        code, token = await manager.create_room()
-        return {"room_code": code, "token": token}
+        code, token = await manager.create_room(max_peers=max_peers)
+        return {"room_code": code, "token": token, "max_peers": max_peers}
     except RoomLimitError:
         return JSONResponse(status_code=503, content={"error": "Server at capacity"})
 
@@ -182,8 +183,8 @@ async def check_room(code: str):
     upper = code.upper().strip()
     if not _ROOM_CODE_RE.match(upper):
         return {"exists": False, "joinable": False}
-    exists, joinable, token = await manager.room_info(upper)
-    resp: dict = {"exists": exists, "joinable": joinable}
+    exists, joinable, token, peer_count, max_peers = await manager.room_info(upper)
+    resp: dict = {"exists": exists, "joinable": joinable, "peer_count": peer_count, "max_peers": max_peers}
     if joinable and token:
         resp["token"] = token
     return resp
@@ -204,7 +205,8 @@ async def debug(request: Request, room_id: str = "default"):
         "room_id": room_id,
         "peers": list(room._peers.keys()),
         "is_full": room.is_full,
-        "peer_count": len(room._peers),
+        "peer_count": room.peer_count,
+        "max_peers": room.max_peers,
     }
 
 
@@ -264,7 +266,7 @@ def _get_allowed_ws_origins() -> set[str]:
 
 @app.websocket("/ws")
 @app.websocket("/ws/{room_id}")
-async def websocket_endpoint(ws: WebSocket, room_id: str = "default", role: str = "host", token: str | None = None):
+async def websocket_endpoint(ws: WebSocket, room_id: str = "default", token: str | None = None):
     # Validate origin — browsers always send Origin on WS handshakes.
     # Reject missing origins to prevent non-browser clients from bypassing validation.
     origin = (ws.headers.get("origin") or "").rstrip("/").lower()
@@ -303,7 +305,7 @@ async def websocket_endpoint(ws: WebSocket, room_id: str = "default", role: str 
             logger.warning("WebSocket accept timeout during room rejection")
         return
     try:
-        await room.handle(ws, role, token)
+        await room.handle(ws, token)
     finally:
         await manager.release_ip(client_ip)
 

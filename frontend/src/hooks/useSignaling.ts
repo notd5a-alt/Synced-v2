@@ -14,6 +14,8 @@ export default function useSignaling(url: string | null): SignalingHook {
   const intentionalCloseRef = useRef(false);
   const urlRef = useRef(url);
   const [state, setState] = useState<SignalingState>("closed");
+  const [peerId, setPeerId] = useState<string | null>(null);
+  const [roomPeers, setRoomPeers] = useState<string[]>([]);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
 
@@ -114,6 +116,20 @@ export default function useSignaling(url: string | null): SignalingHook {
           }
           return;
         }
+        // Handle server-assigned peer ID
+        if (msg.type === "assigned-id") {
+          addLog(`WS recv: assigned-id ${msg.peerId.slice(0, 8)}`);
+          setPeerId(msg.peerId);
+          return;
+        }
+        // Track room state and peer list (also pass through to handler)
+        if (msg.type === "room-state") {
+          setRoomPeers(msg.peers);
+        } else if (msg.type === "peer-joined") {
+          setRoomPeers((prev) => prev.includes(msg.peerId) ? prev : [...prev, msg.peerId]);
+        } else if (msg.type === "peer-disconnected") {
+          setRoomPeers((prev) => prev.filter((id) => id !== msg.peerId));
+        }
         addLog(`WS recv: ${msg.type}`);
         if (onMessageRef.current) {
           onMessageRef.current(msg);
@@ -159,6 +175,8 @@ export default function useSignaling(url: string | null): SignalingHook {
     queueRef.current = [];
     sendQueueRef.current = [];
     onMessageRef.current = null;
+    setPeerId(null);
+    setRoomPeers([]);
     setState("closed");
   }, []);
 
@@ -179,7 +197,7 @@ export default function useSignaling(url: string | null): SignalingHook {
   }, []);
 
   return useMemo(
-    () => ({ connect, send, disconnect, onMessage, state, debugLog, addLog, reconnectAttempt, maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS }),
-    [connect, send, disconnect, onMessage, state, debugLog, addLog, reconnectAttempt]
+    () => ({ connect, send, disconnect, onMessage, state, peerId, roomPeers, debugLog, addLog, reconnectAttempt, maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS }),
+    [connect, send, disconnect, onMessage, state, peerId, roomPeers, debugLog, addLog, reconnectAttempt]
   );
 }

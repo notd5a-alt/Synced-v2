@@ -8,9 +8,14 @@ const defaultProps = {
   roomCode: 'X7KM3P',
   connectionState: 'new',
   signalingState: 'open' as const,
-  signalingUrl: 'ws://localhost:9876/ws/X7KM3P?role=host',
+  signalingUrl: 'ws://localhost:9876/ws/X7KM3P?token=test',
   debugLog: [] as string[],
   timeoutExpired: false,
+  reconnectAttempt: 0,
+  maxReconnectAttempts: 5,
+  peerCount: 0,
+  roomPeers: [] as string[],
+  localPeerId: 'aaaa-bbbb-cccc',
   onRetry: vi.fn(),
   onCancel: vi.fn(),
 };
@@ -22,9 +27,14 @@ describe('Lobby', () => {
     expect(screen.getByText(/HOSTING SESSION/)).toBeInTheDocument();
   });
 
-  it('shows "Waiting for peer..." when signaling is open', () => {
+  it('shows "Waiting for peers..." when signaling is open and no peers', () => {
     render(<Lobby {...defaultProps} />);
-    expect(screen.getByText('Waiting for peer...')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for peers...')).toBeInTheDocument();
+  });
+
+  it('shows peer count when peers are connected', () => {
+    render(<Lobby {...defaultProps} peerCount={2} roomPeers={['peer-1111', 'peer-2222']} />);
+    expect(screen.getByText('3 peers in room')).toBeInTheDocument();
   });
 
   it('shows "Connecting to server..." for joiner', () => {
@@ -49,5 +59,21 @@ describe('Lobby', () => {
   it('shows copy button for room code', () => {
     render(<Lobby {...defaultProps} />);
     expect(screen.getByText('[ COPY ]')).toBeInTheDocument();
+  });
+
+  it('shows peer list with local peer highlighted', () => {
+    render(<Lobby {...defaultProps} localPeerId="aaaa-bbbb-cccc" roomPeers={['peer-1111']} peerCount={1} />);
+    expect(screen.getByText('aaaa-bbb (you)')).toBeInTheDocument();
+    expect(screen.getByText('peer-111')).toBeInTheDocument();
+  });
+
+  it('shows N/8 peers in header', () => {
+    render(<Lobby {...defaultProps} peerCount={3} roomPeers={['a', 'b', 'c']} />);
+    expect(screen.getByText('4 / 8 peers')).toBeInTheDocument();
+  });
+
+  it('does not show peer list when signaling is not open', () => {
+    render(<Lobby {...defaultProps} signalingState="connecting" />);
+    expect(screen.queryByText(/peers/)).toBeNull();
   });
 });

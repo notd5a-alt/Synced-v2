@@ -11,189 +11,293 @@ const DEFAULT_ICE_CONFIG: RTCConfiguration = {
   ],
 };
 
+const MIN_NEGOTIATION_INTERVAL = 2000; // ms — prevent rapid renegotiation
+
+// ---------------------------------------------------------------------------
+// Internal per-peer state (not exported — lives in a ref Map)
+// ---------------------------------------------------------------------------
+interface PeerState {
+  remotePeerId: string;
+  pc: RTCPeerConnection;
+  chatChannel: RTCDataChannel | null;
+  fileChannel: RTCDataChannel | null;
+  remoteStream: MediaStream;
+  remoteScreenStream: MediaStream;
+  hmacKey: CryptoKey | null;
+  hmacDerived: boolean;
+  connectionState: RTCPeerConnectionState;
+  makingOffer: boolean;
+  pendingCandidates: RTCIceCandidateInit[];
+  negotiationQueue: Promise<void>;
+  negotiationTimeout: ReturnType<typeof setTimeout> | null;
+  lastNegotiatedFingerprint: string;
+  lastNegotiationTime: number;
+  pendingScreenTrack: boolean;
+  screenVideoSender: RTCRtpSender | null;
+  screenAudioSender: RTCRtpSender | null;
+  cameraVideoSender: RTCRtpSender | null;
+  micAudioSender: RTCRtpSender | null;
+}
+
+// ---------------------------------------------------------------------------
+// Public per-peer info (subset exposed to consumers)
+// ---------------------------------------------------------------------------
+export interface PeerInfo {
+  peerId: string;
+  pc: RTCPeerConnection;
+  connectionState: RTCPeerConnectionState;
+  chatChannel: RTCDataChannel | null;
+  fileChannel: RTCDataChannel | null;
+  remoteStream: MediaStream;
+  remoteScreenStream: MediaStream;
+  hmacKey: CryptoKey | null;
+}
+
+// ---------------------------------------------------------------------------
+// Hook interface
+// ---------------------------------------------------------------------------
 export interface WebRTCHook {
   init: (iceConfig: RTCConfiguration | null) => void;
+  cleanup: () => void;
+
+  // Shared media state
+  localStream: MediaStream | null;
+  screenStream: MediaStream | null;
+  localStreamRef: MutableRefObject<MediaStream | null>;
+  callError: string | null;
+  audioProcessing: AudioProcessingState;
+  streamRevision: number;
+
+  // Media operations (apply to all peers)
+  startCall: (withVideo?: boolean) => Promise<void>;
+  endCall: () => void;
+  shareScreen: () => Promise<void>;
+  stopScreenShare: () => Promise<void>;
+  toggleAudio: () => void;
+  toggleVideo: () => Promise<void>;
+  toggleAudioProcessing: (key: keyof AudioProcessingState) => Promise<void>;
+  setLocalStream: (fn: (s: MediaStream | null) => MediaStream | null) => void;
+  toggleMuteForPeer: (peerId: string) => Promise<void>;
+  mutedForPeers: Set<string>;
+
+  // Multi-peer API
+  peers: Map<string, PeerInfo>;
+  peerCount: number;
+  localPeerId: string | null;
+
+  // Scalar shims — backward compat for Phase 2 (first/primary peer)
   connectionState: string;
   chatChannel: RTCDataChannel | null;
   fileChannel: RTCDataChannel | null;
   remoteStream: MediaStream;
   remoteScreenStream: MediaStream;
-  /** Incremented whenever remote tracks change (add/remove/mute/unmute). Use as
-   *  a dependency signal to recompute derived values like hasRemoteVideo. */
-  streamRevision: number;
-  localStream: MediaStream | null;
-  startCall: (withVideo?: boolean) => Promise<void>;
-  endCall: () => void;
-  shareScreen: () => Promise<void>;
-  stopScreenShare: () => Promise<void>;
-  screenStream: MediaStream | null;
-  toggleAudio: () => void;
-  toggleVideo: () => Promise<void>;
-  cleanup: () => void;
-  getFingerprint: () => string | null;
-  callError: string | null;
-  pcRef: MutableRefObject<RTCPeerConnection | null>;
-  localStreamRef: MutableRefObject<MediaStream | null>;
   hmacKey: CryptoKey | null;
-  audioProcessing: AudioProcessingState;
-  toggleAudioProcessing: (key: keyof AudioProcessingState) => Promise<void>;
-  setLocalStream: (fn: (s: MediaStream | null) => MediaStream | null) => void;
+  pcRef: MutableRefObject<RTCPeerConnection | null>;
+  getFingerprint: () => string | null;
 }
 
-export default function useWebRTC(signaling: SignalingHook, isHost: boolean): WebRTCHook {
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const chatChannelRef = useRef<RTCDataChannel | null>(null);
-  const fileChannelRef = useRef<RTCDataChannel | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const makingOfferRef = useRef(false);
-  const negotiationQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const negotiationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isHostRef = useRef(isHost);
+// ---------------------------------------------------------------------------
+// Hook implementation
+// ---------------------------------------------------------------------------
+export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
+  // === Refs that mirror props / cross-render state ===
   const signalingRef = useRef(signaling);
-
-  isHostRef.current = isHost;
   signalingRef.current = signaling;
 
-  const screenStreamRef = useRef<MediaStream | null>(null);
-  // Guard flag — set during cleanup to signal pending async ops to bail out
-  const cleaningUpRef = useRef(false);
+  // === Per-peer state ===
+  const peersRef = useRef<Map<string, PeerState>>(new Map());
+  const iceConfigRef = useRef<RTCConfiguration>(DEFAULT_ICE_CONFIG);
+  const initCalledRef = useRef(false);
 
-  const [connectionState, setConnectionState] = useState("new");
-  const [chatChannel, setChatChannel] = useState<RTCDataChannel | null>(null);
-  const [fileChannel, setFileChannel] = useState<RTCDataChannel | null>(null);
-  const remoteStreamRef = useRef<MediaStream>(new MediaStream());
-  const remoteScreenStreamRef = useRef<MediaStream>(new MediaStream());
-  const [streamRevision, setStreamRevision] = useState(0);
-  const bumpRevision = useCallback(() => setStreamRevision((r) => r + 1), []);
-  const pendingScreenTrackRef = useRef(false);
+  // Revision counter — bumped when any peer state changes to trigger re-render
+  const [peerRevision, setPeerRevision] = useState(0);
+  const bumpPeers = useCallback(() => setPeerRevision((r) => r + 1), []);
+
+  // === Shared media state ===
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const cleaningUpRef = useRef(false);
+  const sharingInProgressRef = useRef(false);
+
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
-  const [hmacKey, setHmacKey] = useState<CryptoKey | null>(null);
-  const hmacDerivedRef = useRef(false);
+  const [streamRevision, setStreamRevision] = useState(0);
+  const bumpRevision = useCallback(() => setStreamRevision((r) => r + 1), []);
   const [audioProcessing, setAudioProcessing] = useState<AudioProcessingState>({
     noiseSuppression: true,
     echoCancellation: true,
     autoGainControl: true,
   });
 
-  const setupDataChannel = useCallback((channel: RTCDataChannel, type: "chat" | "file") => {
+  // Scalar shim ref — points to the "primary" peer's PC for useConnectionMonitor
+  const primaryPcRef = useRef<RTCPeerConnection | null>(null);
+
+  const log = useCallback((msg: string) => signalingRef.current.addLog(msg), []);
+
+  // ---------------------------------------------------------------------------
+  // Helper: get first connected peer, or first peer, or null
+  // ---------------------------------------------------------------------------
+  const getPrimaryPeer = useCallback((): PeerState | null => {
+    const peers = peersRef.current;
+    if (peers.size === 0) return null;
+    // Prefer a connected peer
+    for (const ps of peers.values()) {
+      if (ps.connectionState === "connected") return ps;
+    }
+    // Fall back to first entry
+    return peers.values().next().value ?? null;
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Data channel setup (shared logic)
+  // ---------------------------------------------------------------------------
+  const setupDataChannel = useCallback((
+    channel: RTCDataChannel,
+    type: "chat" | "file",
+    ps: PeerState,
+  ) => {
     channel.onopen = () => {
-      if (type === "chat") setChatChannel(channel);
-      else setFileChannel(channel);
+      if (type === "chat") ps.chatChannel = channel;
+      else ps.fileChannel = channel;
+      bumpPeers();
     };
     channel.onclose = () => {
-      if (type === "chat") setChatChannel(null);
-      else setFileChannel(null);
+      if (type === "chat") ps.chatChannel = null;
+      else ps.fileChannel = null;
+      bumpPeers();
     };
-    if (type === "chat") chatChannelRef.current = channel;
-    else fileChannelRef.current = channel;
-  }, []);
+    // Set immediately for host-created channels (readyState may already be open)
+    if (type === "chat") ps.chatChannel = channel;
+    else ps.fileChannel = channel;
+  }, [bumpPeers]);
 
-  const cleanup = useCallback(() => {
-    // Signal all pending async operations (shareScreen, toggleVideo, etc.) to bail out
-    cleaningUpRef.current = true;
+  // ---------------------------------------------------------------------------
+  // Destroy a single peer connection
+  // ---------------------------------------------------------------------------
+  const destroyPeerConnection = useCallback((remotePeerId: string) => {
+    const ps = peersRef.current.get(remotePeerId);
+    if (!ps) return;
 
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    localStreamRef.current = null;
-    // Clear screen track onended handlers to prevent stale closure leaks (C8)
-    screenStreamRef.current?.getTracks().forEach((t) => {
-      t.onended = null;
-      t.stop();
+    log(`RTC destroying PC for ${remotePeerId.slice(0, 8)}`);
+    const { pc } = ps;
+
+    // Clear negotiation timeout
+    if (ps.negotiationTimeout !== null) {
+      clearTimeout(ps.negotiationTimeout);
+      ps.negotiationTimeout = null;
+    }
+
+    // Clean up senders
+    pc.getSenders().forEach((s) => {
+      if (s.track) {
+        s.track.onended = null;
+        s.track.onmute = null;
+        s.track.onunmute = null;
+      }
     });
-    screenStreamRef.current = null;
-    screenAudioSenderRef.current = null;
-    screenVideoSenderRef.current = null;
-    cameraVideoSenderRef.current = null;
-    sharingInProgressRef.current = false;
-    pendingScreenTrackRef.current = false;
-    // Clear track event handlers to prevent leaks
-    const pc = pcRef.current;
-    if (pc) {
-      pc.getSenders().forEach((s) => {
-        if (s.track) {
-          s.track.onended = null;
-          s.track.onmute = null;
-          s.track.onunmute = null;
-        }
-      });
-      pc.getReceivers().forEach((r) => {
-        if (r.track) {
-          r.track.onended = null;
-          r.track.onmute = null;
-          r.track.onunmute = null;
-        }
-      });
-      // Null out PC event handlers to prevent stale closure callbacks (H3)
-      pc.onicecandidate = null;
-      pc.onconnectionstatechange = null;
-      pc.ontrack = null;
-      pc.onnegotiationneeded = null;
-      pc.ondatachannel = null;
-      pc.close();
-    }
-    pcRef.current = null;
-    // Reset negotiation queue so pending ops don't run on closed PC
-    negotiationQueueRef.current = Promise.resolve();
-    if (negotiationTimeoutRef.current !== null) {
-      clearTimeout(negotiationTimeoutRef.current);
-      negotiationTimeoutRef.current = null;
-    }
-    makingOfferRef.current = false;
-    chatChannelRef.current = null;
-    fileChannelRef.current = null;
-    setChatChannel(null);
-    setFileChannel(null);
-    setLocalStream(null);
-    setScreenStream(null);
-    remoteStreamRef.current = new MediaStream();
-    remoteScreenStreamRef.current = new MediaStream();
+    pc.getReceivers().forEach((r) => {
+      if (r.track) {
+        r.track.onended = null;
+        r.track.onmute = null;
+        r.track.onunmute = null;
+      }
+    });
+
+    // Null out handlers
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+    pc.ontrack = null;
+    pc.onnegotiationneeded = null;
+    pc.ondatachannel = null;
+    pc.close();
+
+    peersRef.current.delete(remotePeerId);
+
+    // Update primary PC ref
+    const primary = getPrimaryPeer();
+    primaryPcRef.current = primary?.pc ?? null;
+
+    bumpPeers();
     bumpRevision();
-    setCallError(null);
-    setHmacKey(null);
-    hmacDerivedRef.current = false;
-    setAudioProcessing({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
-    setConnectionState("new");
+  }, [log, getPrimaryPeer, bumpPeers, bumpRevision]);
 
-    // Reset cleanup flag so next init() cycle works normally
-    cleaningUpRef.current = false;
-  }, []);
+  // ---------------------------------------------------------------------------
+  // Create a peer connection for a remote peer
+  // ---------------------------------------------------------------------------
+  const createPeerConnectionRef = useRef<((remotePeerId: string) => void) | null>(null);
+  createPeerConnectionRef.current = (remotePeerId: string) => {
+    if (peersRef.current.has(remotePeerId)) return; // already exists
+    if (cleaningUpRef.current) return;
 
-  const init = useCallback((iceConfig: RTCConfiguration | null) => {
-    if (pcRef.current) return;
-
-    const host = isHostRef.current;
-    const sig = signalingRef.current;
-    const log = (msg: string) => signalingRef.current.addLog(msg);
+    const myId = signalingRef.current.peerId;
+    if (!myId) { log("RTC cannot create PC — no local peerId yet"); return; }
 
     if (typeof RTCPeerConnection === "undefined") {
-      log("ERROR: RTCPeerConnection not available in this webview");
+      log("ERROR: RTCPeerConnection not available");
       setCallError(
         "WebRTC is not supported in this webview. On Linux, install gstreamer WebRTC plugins: sudo apt install gstreamer1.0-nice gstreamer1.0-plugins-bad libgstwebrtc-full-1.0-0"
       );
       return;
     }
 
-    log(`RTC init host=${host} iceServers=${(iceConfig || DEFAULT_ICE_CONFIG).iceServers?.length ?? 0}`);
-    const pc = new RTCPeerConnection(iceConfig || DEFAULT_ICE_CONFIG);
-    pcRef.current = pc;
+    // Negotiation role: lexicographically lower peerId = impolite (creates offer)
+    const impolite = myId < remotePeerId;
+    log(`RTC creating PC for ${remotePeerId.slice(0, 8)} impolite=${impolite} iceServers=${iceConfigRef.current.iceServers?.length ?? 0}`);
 
+    const pc = new RTCPeerConnection(iceConfigRef.current);
+
+    const ps: PeerState = {
+      remotePeerId,
+      pc,
+      chatChannel: null,
+      fileChannel: null,
+      remoteStream: new MediaStream(),
+      remoteScreenStream: new MediaStream(),
+      hmacKey: null,
+      hmacDerived: false,
+      connectionState: "new",
+      makingOffer: false,
+      pendingCandidates: [],
+      negotiationQueue: Promise.resolve(),
+      negotiationTimeout: null,
+      lastNegotiatedFingerprint: "",
+      lastNegotiationTime: 0,
+      pendingScreenTrack: false,
+      screenVideoSender: null,
+      screenAudioSender: null,
+      cameraVideoSender: null,
+      micAudioSender: null,
+    };
+
+    peersRef.current.set(remotePeerId, ps);
+
+    // --- ICE candidates ---
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         signalingRef.current.send({
           type: "ice-candidate",
           candidate: e.candidate.toJSON(),
+          to: remotePeerId,
         });
       }
     };
 
+    // --- Connection state changes ---
     pc.onconnectionstatechange = () => {
-      log(`RTC connectionState: ${pc.connectionState}`);
-      setConnectionState(pc.connectionState);
-      if (pc.connectionState === "connected" && !hmacDerivedRef.current
+      log(`RTC [${remotePeerId.slice(0, 8)}] connectionState: ${pc.connectionState}`);
+      ps.connectionState = pc.connectionState;
+
+      // Update primary PC ref
+      const primary = getPrimaryPeer();
+      primaryPcRef.current = primary?.pc ?? null;
+
+      bumpPeers();
+
+      // HMAC key derivation on connect
+      if (pc.connectionState === "connected" && !ps.hmacDerived
           && pc.localDescription && pc.remoteDescription) {
-        // Guard prevents concurrent calls; retry with backoff on failure (C1)
-        hmacDerivedRef.current = true;
+        ps.hmacDerived = true;
         let retries = 0;
         const maxRetries = 2;
         const attemptDerive = () => {
@@ -201,13 +305,14 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
           deriveHmacKey(pc.localDescription.sdp, pc.remoteDescription.sdp)
             .then((key) => {
               if (key) {
-                setHmacKey(key);
+                ps.hmacKey = key;
+                bumpPeers();
               } else if (retries < maxRetries) {
                 retries++;
                 setTimeout(attemptDerive, 1000 * retries);
               } else {
-                log("HMAC key derivation failed after retries");
-                hmacDerivedRef.current = false;
+                log(`HMAC key derivation failed for ${remotePeerId.slice(0, 8)}`);
+                ps.hmacDerived = false;
               }
             })
             .catch(() => {
@@ -215,8 +320,8 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
                 retries++;
                 setTimeout(attemptDerive, 1000 * retries);
               } else {
-                log("HMAC key derivation failed after retries");
-                hmacDerivedRef.current = false;
+                log(`HMAC key derivation failed for ${remotePeerId.slice(0, 8)}`);
+                ps.hmacDerived = false;
               }
             });
         };
@@ -224,218 +329,289 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       }
     };
 
-    // Remote media tracks — route screen share tracks to a separate stream
-    // based on track ID sent via signaling (contentHint doesn't propagate over WebRTC).
+    // --- Remote tracks ---
     pc.ontrack = (e) => {
-      const isScreen = e.track.kind === "video" && pendingScreenTrackRef.current;
-      if (isScreen) pendingScreenTrackRef.current = false;
-      const targetRef = isScreen ? remoteScreenStreamRef : remoteStreamRef;
-      const target = targetRef.current;
+      const isScreen = e.track.kind === "video" && ps.pendingScreenTrack;
+      if (isScreen) ps.pendingScreenTrack = false;
+      const target = isScreen ? ps.remoteScreenStream : ps.remoteStream;
 
       if (!target.getTracks().includes(e.track)) {
         target.addTrack(e.track);
         bumpRevision();
       }
 
-      // Force re-render on mute/unmute so consumers re-evaluate track state
-      // (tracks arrive muted, unmute when media flows, mute when remote ends call)
       e.track.onmute = bumpRevision;
       e.track.onunmute = bumpRevision;
 
       e.track.onended = () => {
-        // Check both streams and remove from whichever contains the track
-        for (const ref of [remoteStreamRef, remoteScreenStreamRef]) {
-          const s = ref.current;
-          if (s.getTracks().includes(e.track)) {
-            s.removeTrack(e.track);
+        for (const stream of [ps.remoteStream, ps.remoteScreenStream]) {
+          if (stream.getTracks().includes(e.track)) {
+            stream.removeTrack(e.track);
           }
         }
         bumpRevision();
       };
     };
 
-    if (host) {
-      setupDataChannel(pc.createDataChannel("chat", { ordered: true }), "chat");
-      setupDataChannel(pc.createDataChannel("file", { ordered: true }), "file");
+    // --- Data channels ---
+    if (impolite) {
+      // Impolite peer creates data channels (it will send the offer)
+      setupDataChannel(pc.createDataChannel("chat", { ordered: true }), "chat", ps);
+      setupDataChannel(pc.createDataChannel("file", { ordered: true }), "file", ps);
     } else {
+      // Polite peer receives data channels from remote
       pc.ondatachannel = (e) => {
         const ch = e.channel;
-        setupDataChannel(ch, ch.label === "chat" ? "chat" : "file");
+        setupDataChannel(ch, ch.label === "chat" ? "chat" : "file", ps);
       };
     }
 
-    // Serialized offer creation — prevents duplicate/racing offers
-    let peerPresent = false;
-    // Track what was negotiated to prevent infinite renegotiation loops.
-    // Only count senders (local tracks we control) — receivers and sctp.maxChannels
-    // change asynchronously after negotiation completes, which would cause the
-    // fingerprint to differ on the next onnegotiationneeded and trigger a loop.
-    let lastNegotiatedFingerprint = "";
-    let lastNegotiationTime = 0;
-    const MIN_NEGOTIATION_INTERVAL = 2000; // ms — prevent rapid renegotiation
-
-    // ICE candidate queue — buffer candidates arriving before remote description
-    const pendingCandidates: RTCIceCandidateInit[] = [];
-
+    // --- Negotiation ---
     const flushPendingCandidates = async () => {
-      const pc = pcRef.current;
-      if (!pc) return;
-      while (pendingCandidates.length > 0) {
-        const c = pendingCandidates.shift()!;
+      while (ps.pendingCandidates.length > 0) {
+        const c = ps.pendingCandidates.shift()!;
         try { await pc.addIceCandidate(c); } catch { /* stale candidate */ }
       }
     };
 
     const getNegotiationFingerprint = (): string => {
-      const pc = pcRef.current;
-      if (!pc) return "";
-      // Include track IDs to detect replaceTrack changes, not just count
       const ids = pc.getSenders().filter((s) => s.track).map((s) => s.track!.id).sort().join(",");
       return `s${ids}`;
     };
 
     const enqueueNegotiation = () => {
-      negotiationQueueRef.current = negotiationQueueRef.current.then(async () => {
-        const pc = pcRef.current;
-        if (!pc || pc.signalingState !== "stable" || makingOfferRef.current) {
-          log(`RTC negotiate SKIP pc=${!!pc} state=${pc?.signalingState} making=${makingOfferRef.current}`);
+      ps.negotiationQueue = ps.negotiationQueue.then(async () => {
+        if (pc.signalingState !== "stable" || ps.makingOffer) {
+          log(`RTC [${remotePeerId.slice(0, 8)}] negotiate SKIP state=${pc.signalingState} making=${ps.makingOffer}`);
           return;
         }
         try {
-          makingOfferRef.current = true;
-          log("RTC creating offer...");
+          ps.makingOffer = true;
+          log(`RTC [${remotePeerId.slice(0, 8)}] creating offer...`);
           const offer = await pc.createOffer();
-          if (pc.signalingState !== "stable") { log("RTC offer aborted (not stable)"); return; }
-          if (offer.sdp) offer.sdp = optimizeOpusInSDP(offer.sdp, !!screenAudioSenderRef.current);
+          if (pc.signalingState !== "stable") { log(`RTC [${remotePeerId.slice(0, 8)}] offer aborted`); return; }
+          if (offer.sdp) offer.sdp = optimizeOpusInSDP(offer.sdp, !!ps.screenAudioSender);
           await pc.setLocalDescription(offer);
-          log("RTC offer created, sending");
+          log(`RTC [${remotePeerId.slice(0, 8)}] offer sent`);
           signalingRef.current.send({
             type: "offer",
             sdp: pc.localDescription!.sdp,
+            to: remotePeerId,
           });
         } catch (err) {
-          log(`RTC negotiate ERROR: ${err}`);
+          log(`RTC [${remotePeerId.slice(0, 8)}] negotiate ERROR: ${err}`);
           console.error("negotiation error:", err);
         } finally {
-          makingOfferRef.current = false;
+          ps.makingOffer = false;
         }
       });
     };
 
-    // Suppress negotiation until a peer has joined — prevents sending
-    // offers into the void (which leaves the PC stuck in have-local-offer).
-    // Also prevent redundant renegotiation by checking if anything actually
-    // changed (tracks/channels) since the last negotiation.
     pc.onnegotiationneeded = () => {
       const fp = getNegotiationFingerprint();
       const now = Date.now();
-      const elapsed = now - lastNegotiationTime;
-      log(`RTC onnegotiationneeded fp=${fp} last=${lastNegotiatedFingerprint} peer=${peerPresent} elapsed=${elapsed}ms`);
-      if (peerPresent && fp !== lastNegotiatedFingerprint) {
-        lastNegotiatedFingerprint = fp;
-        // Enforce minimum interval to prevent renegotiation storms
+      const elapsed = now - ps.lastNegotiationTime;
+      log(`RTC [${remotePeerId.slice(0, 8)}] onnegotiationneeded fp=${fp} last=${ps.lastNegotiatedFingerprint} elapsed=${elapsed}ms`);
+      if (fp !== ps.lastNegotiatedFingerprint) {
+        ps.lastNegotiatedFingerprint = fp;
         if (elapsed < MIN_NEGOTIATION_INTERVAL) {
           const delay = MIN_NEGOTIATION_INTERVAL - elapsed;
-          log(`RTC negotiate delayed ${delay}ms (cooldown)`);
-          negotiationTimeoutRef.current = setTimeout(() => {
-            negotiationTimeoutRef.current = null;
+          log(`RTC [${remotePeerId.slice(0, 8)}] negotiate delayed ${delay}ms`);
+          ps.negotiationTimeout = setTimeout(() => {
+            ps.negotiationTimeout = null;
             enqueueNegotiation();
           }, delay);
         } else {
           enqueueNegotiation();
         }
-        lastNegotiationTime = now;
+        ps.lastNegotiationTime = now;
       }
     };
 
-    // Register signaling handler — uses a closure over the current PC instance.
-    // The handler checks pcRef identity to bail if PC was replaced (C2).
-    sig.onMessage(async (msg: SignalingMessage) => {
-      // Bail if PC was replaced or cleaned up since handler was registered
-      if (pcRef.current !== pc) { log(`RTC msg ${msg.type} ignored (stale pc)`); return; }
-      if (!pc) { log(`RTC msg ${msg.type} ignored (no pc)`); return; }
-      const host = isHostRef.current;
-
-      try {
-        log(`RTC handle ${msg.type} pcState=${pc.signalingState}`);
-        if (msg.type === "offer") {
-          const collision =
-            makingOfferRef.current || pc.signalingState !== "stable";
-          if (collision && host) {
-            log("RTC offer ignored (impolite collision)");
-            return;
-          }
-          if (collision) {
-            // Rollback must complete before accepting the new offer (spec requirement)
-            await pc.setLocalDescription({ type: "rollback" });
-            await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          } else {
-            await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          }
-          await flushPendingCandidates();
-          const answer = await pc.createAnswer();
-          if (answer.sdp) answer.sdp = optimizeOpusInSDP(answer.sdp, !!screenAudioSenderRef.current);
-          await pc.setLocalDescription(answer);
-          log("RTC answer created, sending");
-          signalingRef.current.send({
-            type: "answer",
-            sdp: pc.localDescription!.sdp,
-          });
-        } else if (msg.type === "answer") {
-          if (pc.signalingState === "have-local-offer") {
-            await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
-            await flushPendingCandidates();
-          }
-        } else if (msg.type === "ice-candidate" && msg.candidate) {
-          // Queue candidates arriving before remote description is set
-          if (!pc.remoteDescription) {
-            pendingCandidates.push(msg.candidate);
-          } else {
-            try {
-              await pc.addIceCandidate(msg.candidate);
-            } catch { /* stale candidate */ }
-          }
-        } else if (msg.type === "peer-joined") {
-          log(`RTC peer-joined host=${host} pcState=${pc.signalingState}`);
-          peerPresent = true;
-          if (host) {
-            if (pc.signalingState === "have-local-offer") {
-              log("RTC rolling back stuck have-local-offer");
-              await pc.setLocalDescription({ type: "rollback" });
-            }
-            // Mark the current state as the fingerprint so onnegotiationneeded
-            // doesn't re-trigger for the same data channels we're about to negotiate
-            lastNegotiatedFingerprint = getNegotiationFingerprint();
-            lastNegotiationTime = Date.now();
-            log(`RTC calling enqueueNegotiation (fp=${lastNegotiatedFingerprint})`);
-            enqueueNegotiation();
-          } else {
-            log("RTC joiner waiting for offer");
-          }
-        } else if (msg.type === "screen-sharing") {
-          // Peer is sharing/stopping screen — flag for ontrack routing
-          if (msg.active) {
-            pendingScreenTrackRef.current = true;
-          } else {
-            pendingScreenTrackRef.current = false;
-            // Clean up screen stream when peer stops sharing
-            const screenStream = remoteScreenStreamRef.current;
-            screenStream.getTracks().forEach((t) => screenStream.removeTrack(t));
-            bumpRevision();
-          }
-        } else if (msg.type === "peer-disconnected") {
-          peerPresent = false;
-          cleanup();
+    // --- Add existing local tracks to new PC ---
+    const lStream = localStreamRef.current;
+    if (lStream) {
+      lStream.getTracks().forEach((t) => {
+        const sender = pc.addTrack(t, lStream);
+        if (t.kind === "audio") {
+          ps.micAudioSender = sender;
+          preferAudioCodecs(pc);
         }
-      } catch (err) {
-        console.error("signaling handler error:", err);
-      }
-    });
-  }, [setupDataChannel, cleanup]);
+        if (t.kind === "video") {
+          ps.cameraVideoSender = sender;
+          preferVideoCodecs(pc, "camera");
+        }
+      });
+    }
 
+    // Add existing screen share tracks
+    const sStream = screenStreamRef.current;
+    if (sStream) {
+      const screenTrack = sStream.getVideoTracks()[0];
+      if (screenTrack) {
+        ps.screenVideoSender = pc.addTrack(screenTrack, sStream);
+        preferVideoCodecs(pc, "screen");
+        signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id, to: remotePeerId });
+      }
+      const audioTrack = sStream.getAudioTracks()[0];
+      if (audioTrack) {
+        ps.screenAudioSender = pc.addTrack(audioTrack, sStream);
+      }
+    }
+
+    // Update primary PC ref
+    primaryPcRef.current = (getPrimaryPeer() ?? ps).pc;
+    bumpPeers();
+
+    // --- If impolite, initiate negotiation ---
+    if (impolite) {
+      ps.lastNegotiatedFingerprint = getNegotiationFingerprint();
+      ps.lastNegotiationTime = Date.now();
+      enqueueNegotiation();
+    }
+
+    // Store the handler functions on PeerState for signaling dispatch
+    (ps as any)._flushPendingCandidates = flushPendingCandidates;
+    (ps as any)._enqueueNegotiation = enqueueNegotiation;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Signaling message handler — dispatches to per-peer PCs
+  // ---------------------------------------------------------------------------
+  const handleSignalingMessage = useCallback(async (msg: SignalingMessage) => {
+    if (cleaningUpRef.current) return;
+
+    try {
+      if (msg.type === "room-state" && "peers" in msg) {
+        // Create PCs for all existing peers in the room
+        for (const peerId of msg.peers) {
+          createPeerConnectionRef.current?.(peerId);
+        }
+        return;
+      }
+
+      if (msg.type === "peer-joined" && "peerId" in msg) {
+        createPeerConnectionRef.current?.(msg.peerId);
+        return;
+      }
+
+      if (msg.type === "peer-disconnected" && "peerId" in msg) {
+        destroyPeerConnection(msg.peerId);
+        return;
+      }
+
+      // All other messages need a `from` field to dispatch to the right PC
+      const from = (msg as any).from as string | undefined;
+      if (!from) { log(`RTC ignoring ${msg.type} — no from field`); return; }
+
+      const ps = peersRef.current.get(from);
+      if (!ps) { log(`RTC ignoring ${msg.type} from ${from.slice(0, 8)} — no PC`); return; }
+
+      const { pc } = ps;
+      const myId = signalingRef.current.peerId;
+      const impolite = myId ? myId < from : false;
+
+      log(`RTC [${from.slice(0, 8)}] handle ${msg.type} pcState=${pc.signalingState}`);
+
+      if (msg.type === "offer") {
+        const collision = ps.makingOffer || pc.signalingState !== "stable";
+        if (collision && impolite) {
+          log(`RTC [${from.slice(0, 8)}] offer ignored (impolite collision)`);
+          return;
+        }
+        if (collision) {
+          await pc.setLocalDescription({ type: "rollback" });
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+        } else {
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+        }
+        await (ps as any)._flushPendingCandidates();
+        const answer = await pc.createAnswer();
+        if (answer.sdp) answer.sdp = optimizeOpusInSDP(answer.sdp, !!ps.screenAudioSender);
+        await pc.setLocalDescription(answer);
+        log(`RTC [${from.slice(0, 8)}] answer sent`);
+        signalingRef.current.send({
+          type: "answer",
+          sdp: pc.localDescription!.sdp,
+          to: from,
+        });
+      } else if (msg.type === "answer") {
+        if (pc.signalingState === "have-local-offer") {
+          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+          await (ps as any)._flushPendingCandidates();
+        }
+      } else if (msg.type === "ice-candidate" && msg.candidate) {
+        if (!pc.remoteDescription) {
+          ps.pendingCandidates.push(msg.candidate);
+        } else {
+          try { await pc.addIceCandidate(msg.candidate); } catch { /* stale */ }
+        }
+      } else if (msg.type === "screen-sharing") {
+        if (msg.active) {
+          ps.pendingScreenTrack = true;
+        } else {
+          ps.pendingScreenTrack = false;
+          const sStream = ps.remoteScreenStream;
+          sStream.getTracks().forEach((t) => sStream.removeTrack(t));
+          bumpRevision();
+        }
+      }
+    } catch (err) {
+      console.error("signaling handler error:", err);
+    }
+  }, [destroyPeerConnection, log, bumpRevision]);
+
+  // ---------------------------------------------------------------------------
+  // init() — stores ICE config, registers signaling handler
+  // ---------------------------------------------------------------------------
+  const init = useCallback((iceConfig: RTCConfiguration | null) => {
+    if (initCalledRef.current) return;
+    initCalledRef.current = true;
+    iceConfigRef.current = iceConfig || DEFAULT_ICE_CONFIG;
+    log(`RTC init iceServers=${iceConfigRef.current.iceServers?.length ?? 0}`);
+    signalingRef.current.onMessage(handleSignalingMessage);
+  }, [handleSignalingMessage, log]);
+
+  // ---------------------------------------------------------------------------
+  // cleanup() — destroy all PCs, reset shared state
+  // ---------------------------------------------------------------------------
+  const cleanup = useCallback(() => {
+    cleaningUpRef.current = true;
+
+    // Stop local media
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    localStreamRef.current = null;
+    screenStreamRef.current?.getTracks().forEach((t) => {
+      t.onended = null;
+      t.stop();
+    });
+    screenStreamRef.current = null;
+    sharingInProgressRef.current = false;
+
+    // Destroy all peer connections
+    for (const remotePeerId of [...peersRef.current.keys()]) {
+      destroyPeerConnection(remotePeerId);
+    }
+    peersRef.current.clear();
+    primaryPcRef.current = null;
+    initCalledRef.current = false;
+
+    // Reset React state
+    setLocalStream(null);
+    setScreenStream(null);
+    setCallError(null);
+    setAudioProcessing({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
+    bumpPeers();
+    bumpRevision();
+
+    cleaningUpRef.current = false;
+  }, [destroyPeerConnection, bumpPeers, bumpRevision]);
+
+  // ---------------------------------------------------------------------------
+  // startCall — get user media, add tracks to all existing PCs
+  // ---------------------------------------------------------------------------
   const startCall = useCallback(async (_withVideo = false) => {
-    const pc = pcRef.current;
-    if (!pc) return;
+    if (peersRef.current.size === 0 && !initCalledRef.current) return;
     setCallError(null);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -448,36 +624,34 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const hasAudio = devices.some((d) => d.kind === "audioinput");
+      if (!hasAudio) { setCallError("No microphone found on this device."); return; }
 
-      if (!hasAudio) {
-        setCallError("No microphone found on this device.");
-        return;
-      }
-
-      // Always start audio-only; camera stays off until user turns it on
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          noiseSuppression: true,
-          echoCancellation: true,
-          autoGainControl: true,
-        },
+        audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
         video: false,
       });
       localStreamRef.current = stream;
       setLocalStream(stream);
-      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-      // Set codec preferences after transceivers exist
-      preferAudioCodecs(pc);
+
+      // Add tracks to all existing PCs
+      for (const ps of peersRef.current.values()) {
+        stream.getTracks().forEach((t) => {
+          const sender = ps.pc.addTrack(t, stream);
+          if (t.kind === "audio") ps.micAudioSender = sender;
+        });
+        preferAudioCodecs(ps.pc);
+      }
     } catch (err) {
       console.error("startCall failed:", err);
       setCallError((err as Error).message || "Failed to access camera/microphone");
     }
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // endCall — stop senders on all PCs
+  // ---------------------------------------------------------------------------
   const endCall = useCallback(() => {
-    const pc = pcRef.current;
-    if (!pc) return;
-    // Stop screen share tracks and clear onended handlers (H5)
+    // Stop screen share first
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => {
         t.onended = null;
@@ -485,44 +659,43 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       });
       screenStreamRef.current = null;
     }
-    // Remove screen senders explicitly to prevent dangling bandwidth usage
-    if (screenVideoSenderRef.current) {
-      try { pc.removeTrack(screenVideoSenderRef.current); } catch { /* already removed */ }
-      screenVideoSenderRef.current = null;
-    }
-    if (screenAudioSenderRef.current) {
-      try { pc.removeTrack(screenAudioSenderRef.current); } catch { /* already removed */ }
-      screenAudioSenderRef.current = null;
-    }
-    if (cameraVideoSenderRef.current) {
-      try { pc.removeTrack(cameraVideoSenderRef.current); } catch { /* already removed */ }
-      cameraVideoSenderRef.current = null;
+
+    for (const ps of peersRef.current.values()) {
+      const { pc } = ps;
+      // Remove screen senders
+      if (ps.screenVideoSender) {
+        try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
+        ps.screenVideoSender = null;
+      }
+      if (ps.screenAudioSender) {
+        try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
+        ps.screenAudioSender = null;
+      }
+      if (ps.cameraVideoSender) {
+        try { pc.removeTrack(ps.cameraVideoSender); } catch { /* already removed */ }
+        ps.cameraVideoSender = null;
+      }
+      // Stop remaining senders (mic, camera)
+      pc.getSenders().forEach((s) => {
+        if (s.track) {
+          s.track.stop();
+          pc.removeTrack(s);
+        }
+      });
     }
     sharingInProgressRef.current = false;
-    // Stop all remaining media senders (mic, camera)
-    pc.getSenders().forEach((s) => {
-      if (s.track) {
-        s.track.stop();
-        pc.removeTrack(s);
-      }
-    });
     localStreamRef.current = null;
     setLocalStream(null);
     setScreenStream(null);
   }, []);
 
-  const screenAudioSenderRef = useRef<RTCRtpSender | null>(null);
-  const sharingInProgressRef = useRef(false);
-  const screenVideoSenderRef = useRef<RTCRtpSender | null>(null);
-  const cameraVideoSenderRef = useRef<RTCRtpSender | null>(null);
-
-   
+  // ---------------------------------------------------------------------------
+  // stopScreenShare — remove screen senders from all PCs
+  // ---------------------------------------------------------------------------
   const stopScreenShare = useCallback(async () => {
-    const pc = pcRef.current;
-    if (!pc || !screenStreamRef.current) return;
+    if (!screenStreamRef.current) return;
 
     sharingInProgressRef.current = false;
-    // Clear onended handlers before stopping tracks to prevent double-fire (C8)
     screenStreamRef.current.getTracks().forEach((t) => {
       t.onended = null;
       t.stop();
@@ -530,25 +703,27 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     screenStreamRef.current = null;
     setScreenStream(null);
 
-    // Remove the system audio sender
-    if (screenAudioSenderRef.current) {
-      try { pc.removeTrack(screenAudioSenderRef.current); } catch { /* already removed */ }
-      screenAudioSenderRef.current = null;
+    for (const ps of peersRef.current.values()) {
+      const { pc } = ps;
+      if (ps.screenAudioSender) {
+        try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
+        ps.screenAudioSender = null;
+      }
+      if (ps.screenVideoSender) {
+        try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
+        ps.screenVideoSender = null;
+      }
     }
 
-    // Remove the screen video sender — camera sender is untouched (dual stream model)
-    if (screenVideoSenderRef.current) {
-      try { pc.removeTrack(screenVideoSenderRef.current); } catch { /* already removed */ }
-      screenVideoSenderRef.current = null;
-    }
-
-    // Notify receiver that screen sharing stopped
+    // Broadcast stop to all peers
     signalingRef.current.send({ type: "screen-sharing", active: false });
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // shareScreen — get display media, add to all PCs
+  // ---------------------------------------------------------------------------
   const shareScreen = useCallback(async () => {
-    const pc = pcRef.current;
-    if (!pc || sharingInProgressRef.current) return;
+    if (peersRef.current.size === 0 || sharingInProgressRef.current) return;
 
     if (!navigator.mediaDevices?.getDisplayMedia) {
       setCallError("Screen sharing is not supported in this browser.");
@@ -561,102 +736,70 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30, max: 60 }, cursor: "always" } as MediaTrackConstraints,
         audio: {
-          // Disable speech processing for system audio — these cause muffling
-          // of music, game audio, and video playback
           noiseSuppression: false,
           echoCancellation: false,
           autoGainControl: false,
         },
-        // Ask Chrome to offer system audio checkbox when sharing entire screen
-        // (without this, audio is only offered for tab/window shares)
         systemAudio: "include",
-        // Allow user to switch shared surface mid-share
         surfaceSwitching: "include",
-        // Ensure "Entire Screen" option is available in the picker
         monitorTypeSurfaces: "include",
       } as any);
 
-      // Abort if stopScreenShare or cleanup was called while awaiting getDisplayMedia (C4/H4)
-      if (!sharingInProgressRef.current || cleaningUpRef.current || pcRef.current !== pc) {
+      if (!sharingInProgressRef.current || cleaningUpRef.current) {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
 
       screenStreamRef.current = stream;
-
-      // Add screen track as a SEPARATE sender (dual stream — camera stays untouched)
       const screenTrack = stream.getVideoTracks()[0];
 
-      // Clean up any stale screen video sender from a previous share session
-      if (screenVideoSenderRef.current) {
-        try { pc.removeTrack(screenVideoSenderRef.current); } catch { /* already removed */ }
-        screenVideoSenderRef.current = null;
-      }
+      // Add screen track to all PCs
+      for (const ps of peersRef.current.values()) {
+        const { pc } = ps;
+        if (ps.screenVideoSender) {
+          try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
+        }
+        ps.screenVideoSender = pc.addTrack(screenTrack, stream);
+        preferVideoCodecs(pc, "screen");
 
-      // Add screen as a new video sender — triggers onnegotiationneeded
-      screenVideoSenderRef.current = pc.addTrack(screenTrack, stream);
+        // Set initial bitrate
+        if (ps.screenVideoSender) {
+          try {
+            const params = ps.screenVideoSender.getParameters();
+            if (params.encodings?.length > 0) {
+              params.encodings[0].maxBitrate = 1_500_000;
+              params.encodings[0].maxFramerate = 30;
+              (params.encodings[0] as any).degradationPreference = "maintain-framerate";
+              await ps.screenVideoSender.setParameters(params);
+            }
+          } catch { /* encoding params not supported */ }
+        }
 
-      // Set screen-optimized codec preferences (VP9 for sharp text/code)
-      preferVideoCodecs(pc, "screen");
-
-      // Notify receiver of the screen track ID (contentHint doesn't propagate over WebRTC)
-      signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id });
-
-      // Hint encoder to prioritize pixel-perfect sharpness for text/code
-      // Set AFTER replaceTrack/addTrack so the transceiver is active
-      if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
-
-      // Set initial screen share bitrate — bandwidth adaptation will adjust
-      // to the correct tier within one poll cycle (~3s). Use conservative
-      // 1.5Mbps default to avoid burst-induced packet loss on poor connections.
-      const screenSender = screenVideoSenderRef.current;
-      if (screenSender) {
-        try {
-          const params = screenSender.getParameters();
-          if (params.encodings?.length > 0) {
-            params.encodings[0].maxBitrate = 1_500_000;
-            params.encodings[0].maxFramerate = 30;
-            (params.encodings[0] as any).degradationPreference = "maintain-framerate";
-            await screenSender.setParameters(params);
+        // Add system audio if present
+        if (ps.screenAudioSender) {
+          try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
+          ps.screenAudioSender = null;
+        }
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          if ("contentHint" in audioTrack) audioTrack.contentHint = "music";
+          try {
+            ps.screenAudioSender = pc.addTrack(audioTrack, stream);
+            const params = ps.screenAudioSender.getParameters();
+            if (params.encodings?.length > 0) {
+              params.encodings[0].maxBitrate = 128_000;
+              await ps.screenAudioSender.setParameters(params);
+            }
+          } catch (err) {
+            console.error("failed to add screen audio:", err);
           }
-        } catch { /* encoding params not supported */ }
-      }
-
-      // Add system audio track if the user chose to share it
-      // Clean up any previous screen audio sender first to prevent duplicates
-      if (screenAudioSenderRef.current) {
-        try { pc.removeTrack(screenAudioSenderRef.current); } catch { /* already removed */ }
-        screenAudioSenderRef.current = null;
-      }
-      const audioTrack = stream.getAudioTracks()[0];
-      if (audioTrack) {
-        // Hint encoder to preserve fidelity for system audio (not speech-optimized)
-        if ("contentHint" in audioTrack) audioTrack.contentHint = "music";
-        // Ensure speech processing is disabled (fallback if getDisplayMedia ignored constraints)
-        try {
-          await audioTrack.applyConstraints({
-            noiseSuppression: false,
-            echoCancellation: false,
-            autoGainControl: false,
-          });
-        } catch { /* constraints not supported for display audio */ }
-        try {
-          screenAudioSenderRef.current = pc.addTrack(audioTrack, stream);
-          // Set higher bitrate for screen share audio (music/system audio needs more than voice)
-          const params = screenAudioSenderRef.current.getParameters();
-          if (params.encodings?.length > 0) {
-            params.encodings[0].maxBitrate = 128_000; // 128kbps for stereo music
-            await screenAudioSenderRef.current.setParameters(params);
-          }
-        } catch (err) {
-          console.error("failed to add screen audio:", err);
         }
       }
 
-      // Register onended BEFORE state update to prevent race with browser's
-      // built-in "Stop sharing" button firing before handler is attached.
-      // Guard against firing while shareScreen() is still executing (B6) —
-      // sharingInProgressRef is cleared in the finally block below.
+      // Notify all peers
+      if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
+      signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id });
+
       screenTrack.onended = () => {
         if (sharingInProgressRef.current) return;
         stopScreenShare().catch((err: unknown) =>
@@ -664,7 +807,6 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         );
       };
 
-      // State update after all track operations are complete
       setScreenStream(stream);
     } catch (err) {
       const e = err as DOMException;
@@ -676,33 +818,70 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     }
   }, [stopScreenShare]);
 
+  // ---------------------------------------------------------------------------
+  // Per-peer selective mute — stop sending audio to a specific peer
+  // ---------------------------------------------------------------------------
+  const mutedForPeersRef = useRef<Set<string>>(new Set());
+  const [mutedForPeers, setMutedForPeers] = useState<Set<string>>(new Set());
+
+  const muteForPeer = useCallback(async (peerId: string) => {
+    const ps = peersRef.current.get(peerId);
+    if (!ps?.micAudioSender) return;
+    try { await ps.micAudioSender.replaceTrack(null); } catch { /* sender gone */ }
+    mutedForPeersRef.current.add(peerId);
+    setMutedForPeers(new Set(mutedForPeersRef.current));
+  }, []);
+
+  const unmuteForPeer = useCallback(async (peerId: string) => {
+    const ps = peersRef.current.get(peerId);
+    if (!ps?.micAudioSender) return;
+    const audioTrack = localStreamRef.current?.getAudioTracks()[0];
+    if (!audioTrack) return;
+    try { await ps.micAudioSender.replaceTrack(audioTrack); } catch { /* sender gone */ }
+    mutedForPeersRef.current.delete(peerId);
+    setMutedForPeers(new Set(mutedForPeersRef.current));
+  }, []);
+
+  const toggleMuteForPeer = useCallback(async (peerId: string) => {
+    if (mutedForPeersRef.current.has(peerId)) {
+      await unmuteForPeer(peerId);
+    } else {
+      await muteForPeer(peerId);
+    }
+  }, [muteForPeer, unmuteForPeer]);
+
+  // ---------------------------------------------------------------------------
+  // toggleAudio
+  // ---------------------------------------------------------------------------
   const toggleAudio = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks()[0];
     if (track) track.enabled = !track.enabled;
     setLocalStream((s) => (s ? new MediaStream(s.getTracks()) : s));
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // toggleVideo — add/remove camera track on all PCs
+  // ---------------------------------------------------------------------------
   const toggleVideo = useCallback(async () => {
-    const pc = pcRef.current;
     const stream = localStreamRef.current;
-    if (!pc || !stream) return;
-
-    // Camera and screen share are independent (dual stream model) — no blocking needed
+    if (!stream) return;
 
     const existingTrack = stream.getVideoTracks()[0];
     if (existingTrack) {
-      // Turn camera off — use cameraVideoSenderRef for reliable lookup (B2)
-      const sender = cameraVideoSenderRef.current
-        && pc.getSenders().includes(cameraVideoSenderRef.current)
-        ? cameraVideoSenderRef.current
-        : pc.getSenders().find((s) => s.track === existingTrack);
+      // Turn camera off
       existingTrack.stop();
       stream.removeTrack(existingTrack);
-      if (sender) {
-        try { await sender.replaceTrack(null); } catch { /* sender gone */ }
+      for (const ps of peersRef.current.values()) {
+        const sender = ps.cameraVideoSender
+          && ps.pc.getSenders().includes(ps.cameraVideoSender)
+          ? ps.cameraVideoSender
+          : ps.pc.getSenders().find((s) => s.track === existingTrack);
+        if (sender) {
+          try { await sender.replaceTrack(null); } catch { /* sender gone */ }
+        }
       }
     } else {
-      // Turn camera on — constrain resolution to avoid initial bandwidth spike
+      // Turn camera on
       try {
         const videoStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
@@ -710,35 +889,35 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
         if (cleaningUpRef.current) { videoStream.getTracks().forEach((t) => t.stop()); return; }
         const newTrack = videoStream.getVideoTracks()[0];
         stream.addTrack(newTrack);
-        // Use dedicated camera sender ref — never fall back to screenVideoSenderRef
-        const existingSender = cameraVideoSenderRef.current
-          && pc.getSenders().includes(cameraVideoSenderRef.current)
-          ? cameraVideoSenderRef.current
-          : null;
-        if (existingSender) {
-          await existingSender.replaceTrack(newTrack);
-        } else {
-          cameraVideoSenderRef.current = pc.addTrack(newTrack, stream);
-        }
-        // Set video codec preferences after adding video transceiver
-        preferVideoCodecs(pc, "camera");
-        // Set initial camera bitrate — bandwidth adaptation will adjust after
-        // connection quality is measured, but this prevents the browser from
-        // starting at an extremely conservative bitrate (~300kbps).
-        const camSender = cameraVideoSenderRef.current;
-        if (camSender) {
-          try {
-            const params = camSender.getParameters();
-            if (params.encodings?.length > 0) {
-              params.encodings[0].maxBitrate = 1_500_000;
-              params.encodings[0].maxFramerate = 24;
-              (params.encodings[0] as any).degradationPreference = "maintain-framerate";
-              await camSender.setParameters(params);
-            }
-          } catch { /* encoding params not supported */ }
+
+        for (const ps of peersRef.current.values()) {
+          const { pc } = ps;
+          const existingSender = ps.cameraVideoSender
+            && pc.getSenders().includes(ps.cameraVideoSender)
+            ? ps.cameraVideoSender
+            : null;
+          if (existingSender) {
+            await existingSender.replaceTrack(newTrack);
+          } else {
+            ps.cameraVideoSender = pc.addTrack(newTrack, stream);
+          }
+          preferVideoCodecs(pc, "camera");
+
+          // Set initial camera bitrate
+          const camSender = ps.cameraVideoSender;
+          if (camSender) {
+            try {
+              const params = camSender.getParameters();
+              if (params.encodings?.length > 0) {
+                params.encodings[0].maxBitrate = 1_500_000;
+                params.encodings[0].maxFramerate = 24;
+                (params.encodings[0] as any).degradationPreference = "maintain-framerate";
+                await camSender.setParameters(params);
+              }
+            } catch { /* encoding params not supported */ }
+          }
         }
       } catch (err) {
-        // Show error feedback so user knows why camera didn't turn on (B3)
         const msg = (err as DOMException)?.name === "NotAllowedError"
           ? "Camera permission denied."
           : "Failed to access camera.";
@@ -749,40 +928,35 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     setLocalStream(new MediaStream(stream.getTracks()));
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // toggleAudioProcessing — replace audio track on all PCs
+  // ---------------------------------------------------------------------------
   const toggleAudioProcessing = useCallback(async (key: keyof AudioProcessingState) => {
     const track = localStreamRef.current?.getAudioTracks()[0];
     if (!track) return;
-    const pc = pcRef.current;
-    if (!pc) return;
 
-    // Read current value from track settings (not state) to avoid stale closure
     const currentSettings = track.getSettings();
     const nextVal = !(currentSettings[key] ?? true);
 
-    // ── Fast path: try applyConstraints first ──
-    // This works reliably for DISABLING features (EC off, NS off) on most
-    // browsers and avoids the audio gap + device lock of full track replacement.
+    // Fast path: applyConstraints
     try {
       await track.applyConstraints({ [key]: nextVal });
       const actualVal = track.getSettings()[key];
       if (actualVal === nextVal) {
         setAudioProcessing((prev) => ({ ...prev, [key]: nextVal }));
-        return; // Browser honored the constraint — done
+        return;
       }
-    } catch {
-      // applyConstraints not supported or failed — fall through to track replacement
+    } catch { /* fall through */ }
+
+    // Slow path: full track replacement
+    const senders: { ps: PeerState; sender: RTCRtpSender }[] = [];
+    for (const ps of peersRef.current.values()) {
+      const sender = ps.pc.getSenders().find(
+        (s) => s.track === track || s.track?.kind === "audio",
+      );
+      if (sender) senders.push({ ps, sender });
     }
 
-    // ── Slow path: full track replacement ──
-    // Needed when re-enabling NS/EC because browsers set up audio processing
-    // pipelines at track creation time and can't re-enable them dynamically.
-
-    // Capture the sender BEFORE stopping the old track (the reference is still valid)
-    const sender = pc.getSenders().find(
-      (s) => s.track === track || s.track?.kind === "audio",
-    );
-
-    // Build constraints preserving current device + all processing settings
     const deviceId = currentSettings.deviceId;
     const constraints: MediaTrackConstraints = {
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
@@ -791,31 +965,24 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       autoGainControl: key === "autoGainControl" ? nextVal : (currentSettings.autoGainControl ?? true),
     };
 
-    // Stop the old track FIRST to release the device — on Windows (WASAPI),
-    // some drivers only allow one active capture at a time. Calling getUserMedia
-    // while the old track is still live can fail or return a silent track.
     track.stop();
 
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
-      if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
+      if (cleaningUpRef.current || !localStreamRef.current) {
         newStream.getTracks().forEach((t) => t.stop());
         return;
       }
 
       const newTrack = newStream.getAudioTracks()[0];
-
-      // Replace the track on the PC sender (no renegotiation needed)
-      if (sender) {
+      for (const { sender } of senders) {
         await sender.replaceTrack(newTrack);
       }
 
-      // Swap into the local stream
       localStreamRef.current.removeTrack(track);
       localStreamRef.current.addTrack(newTrack);
       setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
 
-      // Read actual settings from the new track — browser may not honor all constraints
       const newSettings = newTrack.getSettings();
       setAudioProcessing({
         noiseSuppression: newSettings.noiseSuppression ?? true,
@@ -824,17 +991,16 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
       });
     } catch (err) {
       console.warn("toggleAudioProcessing: track replacement failed:", err);
-
-      // Emergency fallback — the old track is already stopped, so we must
-      // restore audio or the user is left with silence. Try the default device.
       try {
         const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
+        if (cleaningUpRef.current || !localStreamRef.current) {
           fallbackStream.getTracks().forEach((t) => t.stop());
           return;
         }
         const fallbackTrack = fallbackStream.getAudioTracks()[0];
-        if (sender) await sender.replaceTrack(fallbackTrack);
+        for (const { sender } of senders) {
+          await sender.replaceTrack(fallbackTrack);
+        }
         localStreamRef.current.removeTrack(track);
         localStreamRef.current.addTrack(fallbackTrack);
         setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
@@ -851,30 +1017,33 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     }
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // getFingerprint — from primary peer's PC
+  // ---------------------------------------------------------------------------
   const getFingerprint = useCallback((): string | null => {
-    const sdp = pcRef.current?.localDescription?.sdp;
+    const primary = getPrimaryPeer();
+    const sdp = primary?.pc.localDescription?.sdp;
     if (!sdp) return null;
     const match = sdp.match(/a=fingerprint:\S+ (\S+)/);
     return match ? match[1] : null;
-  }, []);
+  }, [getPrimaryPeer]);
 
-  // Auto-switch audio device when current one disappears mid-call
+  // ---------------------------------------------------------------------------
+  // Auto-switch audio device (iterate all PCs)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!localStream) return;
     const handleDeviceChange = async () => {
-      const pc = pcRef.current;
-      if (!pc || cleaningUpRef.current) return;
+      if (cleaningUpRef.current) return;
       const currentTrack = localStreamRef.current?.getAudioTracks()[0];
       if (!currentTrack) return;
       const devices = await navigator.mediaDevices.enumerateDevices();
-      // Re-check after async — cleanup may have run during enumeration (M2)
-      if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) return;
+      if (cleaningUpRef.current || !localStreamRef.current) return;
       const audioDevices = devices.filter((d) => d.kind === "audioinput");
       const currentId = currentTrack.getSettings().deviceId;
       const stillExists = audioDevices.some((d) => d.deviceId === currentId);
       if (!stillExists && audioDevices.length > 0) {
         try {
-          // Preserve user's audio processing preferences from current track
           const settings = currentTrack.getSettings();
           const newStream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -883,22 +1052,20 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
               autoGainControl: settings.autoGainControl ?? true,
             },
           });
-          // Re-check after getUserMedia — cleanup may have run (M2)
-          if (cleaningUpRef.current || !localStreamRef.current || pcRef.current !== pc) {
+          if (cleaningUpRef.current || !localStreamRef.current) {
             newStream.getTracks().forEach((t) => t.stop());
             return;
           }
           const newTrack = newStream.getAudioTracks()[0];
-          const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
-          if (sender) {
-            await sender.replaceTrack(newTrack);
-            currentTrack.stop();
-            localStreamRef.current.removeTrack(currentTrack);
-            localStreamRef.current.addTrack(newTrack);
-            setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-          } else {
-            newTrack.stop(); // no sender to attach to
+          // Replace on all PCs
+          for (const ps of peersRef.current.values()) {
+            const sender = ps.pc.getSenders().find((s) => s.track?.kind === "audio");
+            if (sender) await sender.replaceTrack(newTrack);
           }
+          currentTrack.stop();
+          localStreamRef.current.removeTrack(currentTrack);
+          localStreamRef.current.addTrack(newTrack);
+          setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
         } catch (err) {
           console.error("device switch failed:", err);
         }
@@ -908,34 +1075,122 @@ export default function useWebRTC(signaling: SignalingHook, isHost: boolean): We
     return () => navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
   }, [localStream]);
 
+  // ---------------------------------------------------------------------------
+  // Adaptive quality — cap resolution/fps based on peer count
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const count = peersRef.current.size;
+    if (count < 5) return; // no cap for 1-4 peers
+
+    const applyAdaptiveQuality = async () => {
+      let maxBitrate: number;
+      let maxFramerate: number;
+      let scaleDown: number;
+      if (count >= 7) {
+        // 7-8 peers: 360p/12fps
+        maxBitrate = 350_000;
+        maxFramerate = 12;
+        scaleDown = 2;
+      } else {
+        // 5-6 peers: 480p/15fps
+        maxBitrate = 600_000;
+        maxFramerate = 15;
+        scaleDown = 1.5;
+      }
+
+      for (const ps of peersRef.current.values()) {
+        for (const sender of ps.pc.getSenders()) {
+          if (sender.track?.kind !== "video") continue;
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings?.length) continue;
+            params.encodings[0].maxBitrate = maxBitrate;
+            params.encodings[0].maxFramerate = maxFramerate;
+            params.encodings[0].scaleResolutionDownBy = scaleDown;
+            await sender.setParameters(params);
+          } catch { /* encoding params not supported */ }
+        }
+      }
+    };
+
+    applyAdaptiveQuality();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peerRevision]);
+
+  // Cleanup on unmount
   useEffect(() => {
     return cleanup;
   }, [cleanup]);
 
+  // ---------------------------------------------------------------------------
+  // Build return value — compute maps and scalar shims
+  // ---------------------------------------------------------------------------
+  // Build peers map (read peerRevision to ensure re-computation)
+  void peerRevision;
+  const peersMap = new Map<string, PeerInfo>();
+  for (const [id, ps] of peersRef.current) {
+    peersMap.set(id, {
+      peerId: ps.remotePeerId,
+      pc: ps.pc,
+      connectionState: ps.connectionState,
+      chatChannel: ps.chatChannel,
+      fileChannel: ps.fileChannel,
+      remoteStream: ps.remoteStream,
+      remoteScreenStream: ps.remoteScreenStream,
+      hmacKey: ps.hmacKey,
+    });
+  }
+
+  // Scalar shims from primary peer
+  const primary = getPrimaryPeer();
+  const overallState = (() => {
+    if (peersRef.current.size === 0) return "new";
+    for (const ps of peersRef.current.values()) {
+      if (ps.connectionState === "connected") return "connected";
+    }
+    for (const ps of peersRef.current.values()) {
+      if (ps.connectionState === "connecting") return "connecting";
+    }
+    return primary?.connectionState ?? "new";
+  })();
+
   return {
     init,
-    connectionState,
-    chatChannel,
-    fileChannel,
-    remoteStream: remoteStreamRef.current,
-    remoteScreenStream: remoteScreenStreamRef.current,
-    streamRevision,
+    cleanup,
+
+    // Shared media
     localStream,
+    screenStream,
+    localStreamRef,
+    callError,
+    audioProcessing,
+    streamRevision,
+
+    // Media operations
     startCall,
     endCall,
     shareScreen,
     stopScreenShare,
-    screenStream,
     toggleAudio,
     toggleVideo,
-    cleanup,
-    getFingerprint,
-    callError,
-    pcRef,
-    localStreamRef,
-    hmacKey,
-    audioProcessing,
     toggleAudioProcessing,
     setLocalStream,
+    toggleMuteForPeer,
+    mutedForPeers,
+
+    // Multi-peer API
+    peers: peersMap,
+    peerCount: peersRef.current.size,
+    localPeerId: signaling.peerId,
+
+    // Scalar shims
+    connectionState: overallState,
+    chatChannel: primary?.chatChannel ?? null,
+    fileChannel: primary?.fileChannel ?? null,
+    remoteStream: primary?.remoteStream ?? new MediaStream(),
+    remoteScreenStream: primary?.remoteScreenStream ?? new MediaStream(),
+    hmacKey: primary?.hmacKey ?? null,
+    pcRef: primaryPcRef,
+    getFingerprint,
   };
 }

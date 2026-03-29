@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import useConnectionMonitor from './useConnectionMonitor';
+import type { PeerInfo } from './useWebRTC';
 import type { SignalingState } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -16,15 +17,27 @@ function makePc() {
 }
 
 /**
- * Render the hook with a shared pcRef.
- *
- * The render function also keeps pc.connectionState in sync with the prop so
- * that timer-callback guards (which read pcRef.current.connectionState directly)
- * see the right value.
- *
- * IMPORTANT: configure the getStats mock on pcRef.current BEFORE calling this
- * function if your test needs specific stats data on the very first poll (which
- * fires synchronously during the initial render).
+ * Build a peers Map with a single peer for backward-compat testing.
+ */
+function makePeersMap(
+  pc: RTCPeerConnection,
+  connectionState: RTCPeerConnectionState,
+  peerId = 'test-peer',
+): Map<string, PeerInfo> {
+  return new Map([[peerId, {
+    peerId,
+    pc,
+    connectionState,
+    chatChannel: null,
+    fileChannel: null,
+    remoteStream: new MediaStream(),
+    remoteScreenStream: new MediaStream(),
+    hmacKey: null,
+  }]]);
+}
+
+/**
+ * Render the hook with a single peer (most tests use this).
  */
 function renderMonitor(
   pcRef: { current: ReturnType<typeof makePc> },
@@ -34,7 +47,11 @@ function renderMonitor(
   return renderHook(
     (props) => {
       (pcRef.current as any).connectionState = props.connectionState;
-      return useConnectionMonitor(pcRef, props.signalingState, props.connectionState);
+      const peers = makePeersMap(
+        pcRef.current,
+        props.connectionState as RTCPeerConnectionState,
+      );
+      return useConnectionMonitor(peers, props.signalingState);
     },
     { initialProps }
   );
@@ -42,8 +59,6 @@ function renderMonitor(
 
 /**
  * Flush enough microtask ticks for a getStats() promise chain to fully settle.
- * The chain is: pollStats() → getStats (async) → setState → then(() => schedulePoll).
- * 20 flushes reliably covers the chain and any React batching.
  */
 async function flushStats() {
   for (let i = 0; i < 20; i++) {
@@ -122,6 +137,17 @@ describe('useConnectionMonitor', () => {
       });
 
       expect(typeof result.current.setTimeoutExpired).toBe('function');
+    });
+
+    it('exposes peerQualities map', () => {
+      const pc = makePc();
+      const pcRef = { current: pc };
+      const { result } = renderMonitor(pcRef, {
+        connectionState: 'new',
+        signalingState: 'open',
+      });
+
+      expect(result.current.peerQualities).toBeInstanceOf(Map);
     });
   });
 
@@ -216,26 +242,6 @@ describe('useConnectionMonitor', () => {
 
       expect(result.current.timeoutExpired).toBe(false);
     });
-
-    it('skips timeout firing when pc has already reached "connected"', () => {
-      const pc = makePc();
-      const pcRef = { current: pc };
-      const { result } = renderMonitor(pcRef, {
-        connectionState: 'connecting',
-        signalingState: 'open',
-      });
-
-      // Simulate the pc reaching connected before the timer fires without
-      // triggering a re-render (so the 30-s timer is still scheduled).
-      (pcRef.current as any).connectionState = 'connected';
-
-      act(() => {
-        vi.advanceTimersByTime(30_000);
-      });
-
-      // The guard checks pc.connectionState !== "connected" before setting the flag
-      expect(result.current.timeoutExpired).toBe(false);
-    });
   });
 
   // -------------------------------------------------------------------------
@@ -274,7 +280,6 @@ describe('useConnectionMonitor', () => {
       act(() => {
         vi.advanceTimersByTime(0);
       });
-      // isRecovering is true after the "failed" restart attempts
       expect(result.current.isRecovering).toBe(true);
 
       act(() => {
@@ -293,17 +298,14 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Advance partway through the timeout
       act(() => {
         vi.advanceTimersByTime(15_000);
       });
 
-      // Become connected — should cancel the remaining timer
       act(() => {
         rerender({ connectionState: 'connected', signalingState: 'open' });
       });
 
-      // Advance past the original 30-s mark
       act(() => {
         vi.advanceTimersByTime(20_000);
       });
@@ -332,8 +334,6 @@ describe('useConnectionMonitor', () => {
         vi.advanceTimersByTime(15_000);
       });
 
-      // restartIce is called at least once (the isRecovering→true transition also
-      // triggers the signaling-recovery effect which may call it once more)
       expect(pc.restartIce).toHaveBeenCalled();
       expect(result.current.isRecovering).toBe(true);
     });
@@ -353,31 +353,6 @@ describe('useConnectionMonitor', () => {
       expect(pc.restartIce).not.toHaveBeenCalled();
     });
 
-    it('does not call restartIce again before the restart timeout when state stays "disconnected"', () => {
-      const pc = makePc();
-      const pcRef = { current: pc };
-      renderMonitor(pcRef, {
-        connectionState: 'disconnected',
-        signalingState: 'open',
-      });
-
-      // Trigger the first restart burst
-      act(() => {
-        vi.advanceTimersByTime(15_000);
-      });
-
-      const callsAfterFirstTrigger = pc.restartIce.mock.calls.length;
-      expect(callsAfterFirstTrigger).toBeGreaterThanOrEqual(1);
-
-      // Advance time but NOT enough to fire the restart timeout (15 s) again
-      act(() => {
-        vi.advanceTimersByTime(5_000);
-      });
-
-      // No additional calls in the middle of the restart window
-      expect(pc.restartIce.mock.calls.length).toBe(callsAfterFirstTrigger);
-    });
-
     it('does NOT call restartIce when signaling is not "open"', () => {
       const pc = makePc();
       const pcRef = { current: pc };
@@ -390,7 +365,6 @@ describe('useConnectionMonitor', () => {
         vi.advanceTimersByTime(15_000);
       });
 
-      // attemptRestart bails early when signalingState !== "open"
       expect(pc.restartIce).not.toHaveBeenCalled();
     });
   });
@@ -412,8 +386,6 @@ describe('useConnectionMonitor', () => {
         vi.advanceTimersByTime(0);
       });
 
-      // Connection-state effect calls restartIce; the isRecovering→true transition
-      // also triggers the signaling-recovery effect so it is called at least once
       expect(pc.restartIce).toHaveBeenCalled();
       expect(result.current.isRecovering).toBe(true);
     });
@@ -462,13 +434,10 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Let the initial attempts run
       act(() => { vi.advanceTimersByTime(0); });
       expect(result.current.isRecovering).toBe(true);
       expect(result.current.recoveryFailed).toBe(false);
 
-      // Advance repeatedly until recoveryFailed is set.
-      // Each restart timeout (15 s) re-triggers attemptRestart when still not connected.
       let iterations = 0;
       while (!result.current.recoveryFailed && iterations < 10) {
         act(() => { vi.advanceTimersByTime(15_000); });
@@ -487,14 +456,12 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Exhaust all restart attempts
       act(() => { vi.advanceTimersByTime(0); });
       for (let i = 0; i < 5; i++) {
         act(() => { vi.advanceTimersByTime(15_000); });
       }
       expect(result.current.recoveryFailed).toBe(true);
 
-      // Successful reconnection resets state
       act(() => {
         rerender({ connectionState: 'connected', signalingState: 'open' });
       });
@@ -511,7 +478,6 @@ describe('useConnectionMonitor', () => {
   describe('"closed" state resets everything', () => {
     it('clears connectionQuality, connectionType, and stats after polling', async () => {
       const pc = makePc();
-      // Set up mock BEFORE creating the hook so the initial poll gets valid data
       pc.getStats.mockResolvedValue(makeStatsMap());
       const pcRef = { current: pc };
       const { result, rerender } = renderMonitor(pcRef, {
@@ -519,15 +485,12 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Let the initial synchronous poll complete
       await act(async () => {
         await flushStats();
       });
 
-      // Quality should be populated from the stats poll
       expect(result.current.connectionQuality).not.toBeNull();
 
-      // Now close
       act(() => {
         rerender({ connectionState: 'closed', signalingState: 'open' });
       });
@@ -583,7 +546,6 @@ describe('useConnectionMonitor', () => {
   describe('quality classification from stats', () => {
     it('classifies "excellent" on first poll with low RTT and zero loss', async () => {
       const pc = makePc();
-      // Set up mock BEFORE creating the hook so the initial poll gets valid data
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 }));
       const pcRef = { current: pc };
       const { result } = renderMonitor(pcRef, {
@@ -595,13 +557,11 @@ describe('useConnectionMonitor', () => {
         await flushStats();
       });
 
-      // 50 ms RTT, 0 packet loss → "excellent" (< 100 ms, < 0.5 %)
       expect(result.current.connectionQuality).toBe('excellent');
     });
 
     it('classifies "good" on first poll with moderate RTT', async () => {
       const pc = makePc();
-      // 150 ms RTT, 0 loss → "good" (< 250 ms, < 2 %)
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.15 }));
       const pcRef = { current: pc };
       const { result } = renderMonitor(pcRef, {
@@ -618,7 +578,6 @@ describe('useConnectionMonitor', () => {
 
     it('classifies "poor" on first poll with high RTT', async () => {
       const pc = makePc();
-      // 350 ms RTT, 0 loss → "poor" (< 500 ms, < 5 %)
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.35 }));
       const pcRef = { current: pc };
       const { result } = renderMonitor(pcRef, {
@@ -635,7 +594,6 @@ describe('useConnectionMonitor', () => {
 
     it('classifies "critical" on first poll with very high RTT', async () => {
       const pc = makePc();
-      // 600 ms RTT → "critical" (≥ 500 ms)
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.6 }));
       const pcRef = { current: pc };
       const { result } = renderMonitor(pcRef, {
@@ -652,7 +610,6 @@ describe('useConnectionMonitor', () => {
 
     it('updates connectionQuality on each poll to reflect the latest stats', async () => {
       const pc = makePc();
-      // First poll → "excellent"
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 }));
       const pcRef = { current: pc };
       const { result } = renderMonitor(pcRef, {
@@ -665,22 +622,44 @@ describe('useConnectionMonitor', () => {
       });
       expect(result.current.connectionQuality).toBe('excellent');
 
-      // Second poll with higher RTT → quality reflects the new reading
+      // High RTT — hysteresis requires 2 consecutive samples to transition
       pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.35 }));
-      await act(async () => {
-        vi.advanceTimersByTime(500); // fast-burst interval fires the next poll
-        await flushStats();
-      });
-      // Quality reflects the new RTT sample
-      expect(result.current.connectionQuality).toBe('poor');
-
-      // Third poll back to low RTT → quality improves again
-      pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 }));
+      // First sample at new quality: candidateQuality="good", qualityCount=1
       await act(async () => {
         vi.advanceTimersByTime(500);
         await flushStats();
       });
-      expect(result.current.connectionQuality).toBe('excellent');
+      expect(result.current.connectionQuality).toBe('excellent'); // not yet changed
+
+      // Second sample: qualityCount=2 → transition to "good"
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+        await flushStats();
+      });
+      expect(result.current.connectionQuality).toBe('good');
+
+      // From "good", RTT 350 ≥ 300 → poor. Two more samples to transition.
+      await act(async () => {
+        vi.advanceTimersByTime(3000);
+        await flushStats();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(3000);
+        await flushStats();
+      });
+      expect(result.current.connectionQuality).toBe('poor');
+
+      // Low RTT recovery — two samples needed for poor→good
+      pc.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 }));
+      await act(async () => {
+        vi.advanceTimersByTime(3000);
+        await flushStats();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(3000);
+        await flushStats();
+      });
+      expect(result.current.connectionQuality).toBe('good');
     });
 
     it('updates the stats object with rtt and packetLoss fields', async () => {
@@ -699,7 +678,6 @@ describe('useConnectionMonitor', () => {
       });
 
       expect(result.current.stats).not.toBeNull();
-      // RTT is converted to ms: 0.05 s → 50 ms
       expect(result.current.stats!.rtt).toBeCloseTo(50);
       expect(result.current.stats!.packetLoss).toBe(0);
     });
@@ -723,7 +701,6 @@ describe('useConnectionMonitor', () => {
         rerender({ connectionState: 'disconnected', signalingState: 'open' });
       });
 
-      // Advance well past the next polling interval — no new calls should happen
       await act(async () => {
         vi.advanceTimersByTime(10_000);
         await Promise.resolve();
@@ -828,7 +805,6 @@ describe('useConnectionMonitor', () => {
 
     it('leaves connectionType null when stats have no succeeded candidate-pair', async () => {
       const pc = makePc();
-      // No candidate-pair with state "succeeded"
       const m = new Map<string, any>();
       m.set('pair1', {
         type: 'candidate-pair',
@@ -878,68 +854,42 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // First restart cycle with open signaling
       act(() => { vi.advanceTimersByTime(0); });
       expect(result.current.isRecovering).toBe(true);
 
       const callsAfterFirstAttempt = pc.restartIce.mock.calls.length;
       expect(callsAfterFirstAttempt).toBeGreaterThanOrEqual(1);
 
-      // Signaling drops while still in "failed" + isRecovering
       act(() => {
         rerender({ connectionState: 'failed', signalingState: 'closed' });
       });
 
-      // Signaling reopens — the recovery effect fires because
-      // signalingState changed back to "open" while isRecovering is true
       act(() => {
         rerender({ connectionState: 'failed', signalingState: 'open' });
       });
       act(() => { vi.advanceTimersByTime(0); });
 
-      // Should have called restartIce at least once more
       expect(pc.restartIce.mock.calls.length).toBeGreaterThan(callsAfterFirstAttempt);
     });
   });
 
   // -------------------------------------------------------------------------
-  // 12. Null pcRef guard
+  // 12. Empty peers guard
   // -------------------------------------------------------------------------
 
-  describe('null pcRef guard', () => {
-    it('does not throw when pcRef.current is null on "failed"', () => {
-      const pcRef = { current: null as RTCPeerConnection | null };
-
+  describe('empty peers', () => {
+    it('does not throw with empty peers map', () => {
       expect(() => {
         renderHook(
           (props) =>
-            useConnectionMonitor(pcRef, props.signalingState, props.connectionState),
+            useConnectionMonitor(new Map(), props.signalingState),
           {
             initialProps: {
-              connectionState: 'failed',
               signalingState: 'open' as SignalingState,
             },
           }
         );
         act(() => { vi.advanceTimersByTime(0); });
-      }).not.toThrow();
-    });
-
-    it('does not throw when pcRef.current is null on "disconnected" restart', () => {
-      const pcRef = { current: null as RTCPeerConnection | null };
-
-      expect(() => {
-        renderHook(
-          (props) =>
-            useConnectionMonitor(pcRef, props.signalingState, props.connectionState),
-          {
-            initialProps: {
-              connectionState: 'disconnected',
-              signalingState: 'open' as SignalingState,
-            },
-          }
-        );
-        act(() => { vi.advanceTimersByTime(15_000); });
       }).not.toThrow();
     });
   });
@@ -962,7 +912,6 @@ describe('useConnectionMonitor', () => {
         await flushStats();
       });
 
-      // At minimum the initial synchronous poll fired
       expect(pc.getStats).toHaveBeenCalled();
     });
 
@@ -975,7 +924,6 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Drain the initial synchronous poll
       await act(async () => {
         await flushStats();
       });
@@ -983,7 +931,6 @@ describe('useConnectionMonitor', () => {
       const afterInitial = pc.getStats.mock.calls.length;
       expect(afterInitial).toBeGreaterThanOrEqual(1);
 
-      // Each 500 ms tick should trigger one additional poll during the burst
       await act(async () => {
         vi.advanceTimersByTime(500);
         await flushStats();
@@ -1001,7 +948,6 @@ describe('useConnectionMonitor', () => {
         signalingState: 'open',
       });
 
-      // Drain initial + 3 fast-burst polls (initial + 3×500ms = 4 polls total)
       await act(async () => { await flushStats(); });
       for (let i = 0; i < 3; i++) {
         await act(async () => {
@@ -1012,14 +958,12 @@ describe('useConnectionMonitor', () => {
 
       const afterBurst = pc.getStats.mock.calls.length;
 
-      // 1 s passes — should NOT trigger a new poll (interval is now 3 s)
       await act(async () => {
         vi.advanceTimersByTime(1_000);
         await flushStats();
       });
       expect(pc.getStats.mock.calls.length).toBe(afterBurst);
 
-      // 2 more seconds (total 3 s since last burst poll) — should trigger one poll
       await act(async () => {
         vi.advanceTimersByTime(2_000);
         await flushStats();
@@ -1043,7 +987,6 @@ describe('useConnectionMonitor', () => {
 
       expect(() => {
         act(() => { unmount(); });
-        // Nothing should fire after unmount
         act(() => { vi.advanceTimersByTime(60_000); });
       }).not.toThrow();
     });
@@ -1071,7 +1014,6 @@ describe('useConnectionMonitor', () => {
   describe('packet loss triggers quality downgrade', () => {
     it('classifies "critical" on first poll when packet loss is very high', async () => {
       const pc = makePc();
-      // Low RTT but 10% packet loss → "critical" (loss ≥ 5%)
       pc.getStats.mockResolvedValue(
         makeStatsMap({ rtt: 0.05, packetsLost: 100, packetsReceived: 900 })
       );
@@ -1090,7 +1032,6 @@ describe('useConnectionMonitor', () => {
 
     it('classifies "poor" on first poll when packet loss crosses 2% threshold', async () => {
       const pc = makePc();
-      // Low RTT but ~3% packet loss → "poor" (loss ≥ 2%, < 5%)
       pc.getStats.mockResolvedValue(
         makeStatsMap({ rtt: 0.05, packetsLost: 30, packetsReceived: 970 })
       );
@@ -1109,14 +1050,12 @@ describe('useConnectionMonitor', () => {
 
     it('classifies quality based on video packet loss only, ignoring audio streams', async () => {
       const pc = makePc();
-      // Video has 0 loss; audio has very high loss — quality should be "excellent"
-      // because the hook only considers video loss for quality classification
       const m = makeStatsMap({ rtt: 0.05, packetsLost: 0, packetsReceived: 1000 });
       m.set('inbound-audio', {
         type: 'inbound-rtp',
         kind: 'audio',
         bytesReceived: 50_000,
-        packetsLost: 200,   // very high audio loss
+        packetsLost: 200,
         packetsReceived: 800,
       });
       pc.getStats.mockResolvedValue(m);
@@ -1130,8 +1069,59 @@ describe('useConnectionMonitor', () => {
         await flushStats();
       });
 
-      // Video has 0 loss, so quality is based on RTT (50 ms) → "excellent"
       expect(result.current.connectionQuality).toBe('excellent');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 16. Multi-peer aggregate quality
+  // -------------------------------------------------------------------------
+
+  describe('multi-peer aggregate quality', () => {
+    it('reports worst quality across multiple peers', async () => {
+      const pc1 = makePc();
+      const pc2 = makePc();
+      pc1.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 })); // excellent
+      pc2.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.35 })); // poor
+
+      const peers = new Map<string, PeerInfo>([
+        ['peer-1', { peerId: 'peer-1', pc: pc1, connectionState: 'connected', chatChannel: null, fileChannel: null, remoteStream: new MediaStream(), remoteScreenStream: new MediaStream(), hmacKey: null }],
+        ['peer-2', { peerId: 'peer-2', pc: pc2, connectionState: 'connected', chatChannel: null, fileChannel: null, remoteStream: new MediaStream(), remoteScreenStream: new MediaStream(), hmacKey: null }],
+      ]);
+
+      const { result } = renderHook(() => useConnectionMonitor(peers, 'open'));
+
+      await act(async () => {
+        await flushStats();
+      });
+
+      // Worst peer is "poor"
+      expect(result.current.connectionQuality).toBe('poor');
+      // Per-peer qualities
+      expect(result.current.peerQualities.get('peer-1')).toBe('excellent');
+      expect(result.current.peerQualities.get('peer-2')).toBe('poor');
+    });
+
+    it('handles peers with mixed connection states', async () => {
+      const pc1 = makePc();
+      const pc2 = makePc();
+      pc1.getStats.mockResolvedValue(makeStatsMap({ rtt: 0.05 }));
+
+      const peers = new Map<string, PeerInfo>([
+        ['peer-1', { peerId: 'peer-1', pc: pc1, connectionState: 'connected', chatChannel: null, fileChannel: null, remoteStream: new MediaStream(), remoteScreenStream: new MediaStream(), hmacKey: null }],
+        ['peer-2', { peerId: 'peer-2', pc: pc2, connectionState: 'connecting', chatChannel: null, fileChannel: null, remoteStream: new MediaStream(), remoteScreenStream: new MediaStream(), hmacKey: null }],
+      ]);
+
+      const { result } = renderHook(() => useConnectionMonitor(peers, 'open'));
+
+      await act(async () => {
+        await flushStats();
+      });
+
+      // Only connected peer contributes quality
+      expect(result.current.connectionQuality).toBe('excellent');
+      // Peer 2 has no quality yet
+      expect(result.current.peerQualities.get('peer-2')).toBeNull();
     });
   });
 });

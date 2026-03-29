@@ -18,7 +18,7 @@ const defaultProps = {
 
 const sampleMessages: ChatMessage[] = [
   { type: 'text', id: 'msg-1', content: 'Hello!', timestamp: 1700000000000, from: 'you', reactions: {} },
-  { type: 'text', id: 'msg-2', content: 'Hi there!', timestamp: 1700000001000, from: 'peer', reactions: {} },
+  { type: 'text', id: 'msg-2', content: 'Hi there!', timestamp: 1700000001000, from: 'peer-abc1', reactions: {} },
 ];
 
 describe('Chat', () => {
@@ -30,7 +30,7 @@ describe('Chat', () => {
   it('renders messages with correct sender labels', () => {
     render(<Chat {...defaultProps} messages={sampleMessages} />);
     expect(screen.getByText('> You')).toBeInTheDocument();
-    expect(screen.getByText('< Peer')).toBeInTheDocument();
+    expect(screen.getByText('< peer-abc')).toBeInTheDocument();
     expect(screen.getByText('Hello!')).toBeInTheDocument();
     expect(screen.getByText('Hi there!')).toBeInTheDocument();
   });

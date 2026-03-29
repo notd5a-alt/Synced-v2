@@ -88,9 +88,41 @@ async def test_check_room_exists(client):
 
 
 @pytest.mark.anyio
+async def test_check_room_returns_peer_info(client):
+    """Room info includes peer_count and max_peers."""
+    create_resp = await client.post("/api/rooms")
+    code = create_resp.json()["room_code"]
+
+    resp = await client.get(f"/api/rooms/{code}")
+    data = resp.json()
+    assert data["exists"] is True
+    assert data["peer_count"] == 0
+    assert data["max_peers"] == 8
+
+
+@pytest.mark.anyio
 async def test_check_room_not_found(client):
     resp = await client.get("/api/rooms/ZZZZZ9")
     data = resp.json()
     assert data["exists"] is False
     assert data["joinable"] is False
     assert "token" not in data
+
+
+@pytest.mark.anyio
+async def test_create_room_with_max_peers(client):
+    """Room creation accepts max_peers parameter."""
+    resp = await client.post("/api/rooms?max_peers=4")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["max_peers"] == 4
+
+
+@pytest.mark.anyio
+async def test_create_room_clamps_max_peers(client):
+    """max_peers is clamped to [2, 8]."""
+    resp = await client.post("/api/rooms?max_peers=100")
+    assert resp.json()["max_peers"] == 8
+
+    resp = await client.post("/api/rooms?max_peers=1")
+    assert resp.json()["max_peers"] == 2

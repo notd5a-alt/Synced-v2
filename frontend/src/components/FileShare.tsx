@@ -1,6 +1,20 @@
-import { useRef, type ChangeEvent, type DragEvent } from "react";
+import { useRef, useCallback, type ChangeEvent, type DragEvent } from "react";
 import type { IncomingFile, OutgoingFile } from "../types";
-import type { SentFile } from "../hooks/useFileTransfer";
+import type { SentFile } from "../hooks/useMultiFileTransfer";
+
+const isTauri = typeof window !== "undefined" && "__TAURI__" in window;
+
+async function tauriSaveFile(blobUrl: string, fileName: string): Promise<void> {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const { writeFile } = await import("@tauri-apps/plugin-fs");
+
+  const path = await save({ defaultPath: fileName });
+  if (!path) return;
+
+  const response = await fetch(blobUrl);
+  const buffer = await response.arrayBuffer();
+  await writeFile(path, new Uint8Array(buffer));
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,6 +46,17 @@ interface FileShareProps {
 
 export default function FileShare({ incoming, outgoing, sentFiles, onSendFile, onCancel }: FileShareProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleDownload = useCallback((blobUrl: string, fileName: string) => {
+    if (isTauri) {
+      tauriSaveFile(blobUrl, fileName).catch(console.error);
+    } else {
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = fileName;
+      a.click();
+    }
+  }, []);
 
   const handleFile = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -115,9 +140,9 @@ export default function FileShare({ incoming, outgoing, sentFiles, onSendFile, o
           </div>
           {f.status === "completed" && f.blobUrl ? (
             <div>
-              <a href={f.blobUrl} download={f.name} className="btn small">
+              <button className="btn small" onClick={() => handleDownload(f.blobUrl!, f.name)}>
                 [ DOWNLOAD ({formatSize(f.size)}) ]
-              </a>
+              </button>
               {f.compressedSize < f.size && (
                 <span className="compression-badge">
                   {" "}Transferred {formatSize(f.compressedSize)} ({compressionRatio(f.size, f.compressedSize)})
