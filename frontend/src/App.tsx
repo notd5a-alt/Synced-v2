@@ -40,6 +40,9 @@ export default function App() {
   const [displayName, setDisplayName] = useState(
     () => localStorage.getItem("synced-display-name") || "",
   );
+  const [profilePic, setProfilePic] = useState(
+    () => localStorage.getItem("synced-profile-pic") || "",
+  );
   const sigConnectedRef = useRef(false);
   const nsAutoEnabledRef = useRef(false);
 
@@ -63,13 +66,10 @@ export default function App() {
   const micLevel = useMicLevel(webrtc.localStream);
   const noiseSuppression = useNoiseSuppression();
 
-  // Keep legacy persistent audio element in sync for useAudioDevices setSinkId.
-  // Actual multi-peer audio is handled by PeerAudio components.
-  useEffect(() => {
-    if (persistentAudioRef.current) {
-      persistentAudioRef.current.srcObject = webrtc.localStream ? webrtc.remoteStream : null;
-    }
-  }, [webrtc.localStream, webrtc.remoteStream, webrtc.streamRevision]);
+  // Legacy persistent audio element exists only for useAudioDevices setSinkId.
+  // Actual multi-peer audio is handled by PeerAudio components — do NOT set
+  // srcObject here, as that would create a second audio path that bypasses
+  // per-peer local muting.
 
   // Full state reset — shared by handleDisconnect and peer-disconnect effect.
   // Idempotent: webrtc.cleanup() no-ops if PC is already null.
@@ -141,16 +141,21 @@ export default function App() {
     }
   }, [webrtc.peerCount, webrtc.connectionState, screen, fullReset]);
 
-  // Send display name to all peers when peer count changes (new peer joined)
+  // Send display name and profile pic to all peers when peer count changes (new peer joined)
   const displayNameRef = useRef(displayName);
   displayNameRef.current = displayName;
+  const profilePicRef = useRef(profilePic);
+  profilePicRef.current = profilePic;
   useEffect(() => {
-    if (webrtc.peerCount > 0 && displayNameRef.current) {
+    if (webrtc.peerCount > 0) {
       // Small delay to ensure data channels are open
-      const t = setTimeout(() => chat.sendDisplayName(displayNameRef.current), 500);
+      const t = setTimeout(() => {
+        if (displayNameRef.current) chat.sendDisplayName(displayNameRef.current);
+        if (profilePicRef.current) chat.sendProfilePic(profilePicRef.current);
+      }, 500);
       return () => clearTimeout(t);
     }
-  }, [webrtc.peerCount, chat.sendDisplayName]);
+  }, [webrtc.peerCount, chat.sendDisplayName, chat.sendProfilePic]);
 
   const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
 
@@ -490,7 +495,7 @@ export default function App() {
   const screenClass = screenAnim === "exit" ? "screen-exit" : screenAnim === "enter" ? "screen-enter" : "";
 
   if (screen === "home") {
-    return <div className={screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} displayName={displayName} onDisplayNameChange={setDisplayName} /></div>;
+    return <div className={screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} uiScale={theme.uiScale} onUiScaleChange={theme.setUiScale} displayName={displayName} onDisplayNameChange={setDisplayName} profilePic={profilePic} onProfilePicChange={setProfilePic} /></div>;
   }
 
   if (screen === "lobby") {
@@ -583,7 +588,7 @@ export default function App() {
 
       {showThemePanel && (
         <div className="theme-panel">
-          <ThemeSelector currentTheme={theme.themeId} onSelect={theme.setTheme} currentCanvasBg={theme.canvasBgId} onCanvasBgSelect={theme.setCanvasBg} />
+          <ThemeSelector currentTheme={theme.themeId} onSelect={theme.setTheme} currentCanvasBg={theme.canvasBgId} onCanvasBgSelect={theme.setCanvasBg} currentScale={theme.uiScale} onScaleSelect={theme.setUiScale} />
         </div>
       )}
 
@@ -638,13 +643,8 @@ export default function App() {
           muted={deafened || locallyMutedPeers.has(peer.peerId)}
         />
       ))}
-      {/* Legacy ref for useAudioDevices setSinkId */}
-      <audio
-        ref={persistentAudioRef}
-        autoPlay
-        muted={deafened}
-        style={{ display: "none" }}
-      />
+      {/* Legacy ref for useAudioDevices setSinkId — no srcObject, just a target for output device */}
+      <audio ref={persistentAudioRef} style={{ display: "none" }} />
 
       <main className="session-content">
         {activeTab === "chat" && (
@@ -660,6 +660,8 @@ export default function App() {
             peerReadUpTo={chat.peerReadUpTo}
             peerTyping={chat.peerTyping}
             peerNames={chat.peerNames}
+            peerAvatars={chat.peerAvatars}
+            localProfilePic={profilePic}
           />
           </div>
         )}
@@ -733,6 +735,8 @@ export default function App() {
               chat.sendAudioState(muted, newDeafened);
             }}
             localDisplayName={displayName}
+            localProfilePic={profilePic}
+            peerAvatars={chat.peerAvatars}
           />
           </div>
         )}
@@ -758,5 +762,11 @@ function PeerAudio({ stream, muted }: { stream: MediaStream; muted: boolean }) {
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream;
   }, [stream]);
-  return <audio ref={ref} autoPlay muted={muted} style={{ display: "none" }} />;
+  // React doesn't reliably update the DOM `muted` property via the JSX attribute
+  // (it treats it as an HTML attribute, not a DOM property). Use a ref + effect
+  // to ensure muted state is always applied correctly.
+  useEffect(() => {
+    if (ref.current) ref.current.muted = muted;
+  }, [muted]);
+  return <audio ref={ref} autoPlay style={{ display: "none" }} />;
 }

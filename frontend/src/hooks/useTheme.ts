@@ -248,8 +248,18 @@ export const canvasBackgrounds: CanvasBackground[] = [
 
 const STORAGE_KEY = "synced-theme";
 const CANVAS_BG_KEY = "synced-canvas-bg";
+const SCALE_KEY = "synced-ui-scale";
 const DEFAULT_THEME = "terminal";
 const DEFAULT_CANVAS_BG = "dots";
+const DEFAULT_SCALE = 1;
+
+export const scaleOptions = [
+  { value: 0.8, label: "80%" },
+  { value: 0.9, label: "90%" },
+  { value: 1, label: "100%" },
+  { value: 1.1, label: "110%" },
+  { value: 1.25, label: "125%" },
+];
 
 function applyTheme(theme: ThemeDefinition) {
   const root = document.documentElement;
@@ -277,6 +287,15 @@ export default function useTheme() {
     }
   });
 
+  const [uiScale, setUiScaleState] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(SCALE_KEY);
+      return stored ? parseFloat(stored) || DEFAULT_SCALE : DEFAULT_SCALE;
+    } catch {
+      return DEFAULT_SCALE;
+    }
+  });
+
   useEffect(() => {
     const theme = themes.find((t) => t.id === themeId) || themes[0];
     applyTheme(theme);
@@ -300,6 +319,15 @@ export default function useTheme() {
     }
   }, [canvasBgId]);
 
+  useEffect(() => {
+    document.documentElement.style.zoom = String(uiScale);
+    try {
+      localStorage.setItem(SCALE_KEY, String(uiScale));
+    } catch {
+      // storage full or blocked
+    }
+  }, [uiScale]);
+
   const setTheme = useCallback((id: string) => {
     setThemeId(id);
   }, []);
@@ -308,5 +336,9 @@ export default function useTheme() {
     setCanvasBgId(id);
   }, []);
 
-  return { themeId, setTheme, themes, canvasBgId, setCanvasBg, canvasBackgrounds };
+  const setUiScale = useCallback((scale: number) => {
+    setUiScaleState(scale);
+  }, []);
+
+  return { themeId, setTheme, themes, canvasBgId, setCanvasBg, canvasBackgrounds, uiScale, setUiScale };
 }

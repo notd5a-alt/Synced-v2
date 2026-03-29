@@ -1,10 +1,12 @@
-import { themes, canvasBackgrounds } from "../hooks/useTheme";
+import { themes, canvasBackgrounds, scaleOptions } from "../hooks/useTheme";
 
 interface ThemeSelectorProps {
   currentTheme: string;
   onSelect: (id: string) => void;
   currentCanvasBg: string;
   onCanvasBgSelect: (id: string) => void;
+  currentScale: number;
+  onScaleSelect: (scale: number) => void;
 }
 
 export default function ThemeSelector({
@@ -12,9 +14,26 @@ export default function ThemeSelector({
   onSelect,
   currentCanvasBg,
   onCanvasBgSelect,
+  currentScale,
+  onScaleSelect,
 }: ThemeSelectorProps) {
   return (
     <div className="theme-selector">
+      <div className="style-section">
+        <span className="theme-label">SCALE</span>
+        <div className="theme-options">
+          {scaleOptions.map((opt) => (
+            <button
+              key={opt.value}
+              className={`theme-swatch scale-swatch ${currentScale === opt.value ? "active" : ""}`}
+              onClick={() => onScaleSelect(opt.value)}
+              title={opt.label}
+            >
+              <span className="swatch-name">{opt.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="style-section">
         <span className="theme-label">THEME</span>
         <div className="theme-options">

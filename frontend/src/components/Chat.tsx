@@ -14,6 +14,8 @@ interface ChatProps {
   peerReadUpTo: string | null;
   peerTyping: boolean;
   peerNames?: Map<string, string>;
+  peerAvatars?: Map<string, string>;
+  localProfilePic?: string;
 }
 
 export default function Chat({
@@ -27,6 +29,8 @@ export default function Chat({
   peerReadUpTo,
   peerTyping,
   peerNames,
+  peerAvatars,
+  localProfilePic,
 }: ChatProps) {
   const [text, setText] = useState("");
   const [pickerMsgId, setPickerMsgId] = useState<string | null>(null);
@@ -89,7 +93,17 @@ export default function Chat({
             }
           >
             <span className="msg-sender">
-              {m.from === "you" ? "> You" : `< ${peerNames?.get(m.from) || m.from.slice(0, 8)}`}
+              {m.from === "you" ? (
+                <>
+                  {localProfilePic && <img src={localProfilePic} alt="" className="msg-avatar" />}
+                  {"> You"}
+                </>
+              ) : (
+                <>
+                  {peerAvatars?.get(m.from) && <img src={peerAvatars.get(m.from)} alt="" className="msg-avatar" />}
+                  {`< ${peerNames?.get(m.from) || m.from.slice(0, 8)}`}
+                </>
+              )}
             </span>
             <span className="msg-text">{m.content}</span>
             <span className="msg-time">

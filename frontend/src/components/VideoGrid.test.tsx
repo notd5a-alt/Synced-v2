@@ -154,19 +154,35 @@ describe('VideoGrid', () => {
     expect(container.querySelector('.video-tile.disconnected')).toBeTruthy();
   });
 
-  it('renders screen share tile with expand hint', () => {
+  it('renders screen share tile with lazy-load placeholder', () => {
     const peers = new Map([
       ['peer-aaaa', createPeer('peer-aaaa', { video: true, screen: true })],
     ]);
     render(<VideoGrid {...defaultProps} peers={peers} />);
-    expect(screen.getByText('Double-click to expand')).toBeInTheDocument();
+    // Screen shares start unloaded with a "Click to watch" placeholder
+    expect(screen.getByText('Click to watch')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Watch screen share/)).toBeInTheDocument();
   });
 
-  it('expands screen share tile on double-click', () => {
+  it('starts watching screen share on placeholder click', () => {
+    const peers = new Map([
+      ['peer-aaaa', createPeer('peer-aaaa', { video: true, screen: true })],
+    ]);
+    render(<VideoGrid {...defaultProps} peers={peers} />);
+
+    // Click placeholder to start watching — screen share tile should now render video
+    fireEvent.click(screen.getByText('Click to watch'));
+    expect(screen.getByLabelText(/Expand screen share/)).toBeInTheDocument();
+  });
+
+  it('expands screen share tile on double-click after watching', () => {
     const peers = new Map([
       ['peer-aaaa', createPeer('peer-aaaa', { video: true, screen: true })],
     ]);
     const { container } = render(<VideoGrid {...defaultProps} peers={peers} />);
+
+    // Start watching first
+    fireEvent.click(screen.getByText('Click to watch'));
 
     // Double-click the canvas-tile wrapper containing the screen share
     const screenLabel = screen.getByLabelText(/Expand screen share/);
@@ -183,7 +199,8 @@ describe('VideoGrid', () => {
     ]);
     const { container } = render(<VideoGrid {...defaultProps} peers={peers} />);
 
-    // Double-click to expand
+    // Start watching, then expand
+    fireEvent.click(screen.getByText('Click to watch'));
     const screenLabel = screen.getByLabelText(/Expand screen share/);
     const wrapper = screenLabel.closest('.canvas-tile') as HTMLElement;
     fireEvent.doubleClick(wrapper);

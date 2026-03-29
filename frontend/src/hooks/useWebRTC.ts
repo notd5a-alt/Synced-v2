@@ -975,7 +975,9 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
       }
 
       const newTrack = newStream.getAudioTracks()[0];
-      for (const { sender } of senders) {
+      for (const { ps, sender } of senders) {
+        // Don't restore audio for selectively-muted peers
+        if (mutedForPeersRef.current.has(ps.remotePeerId)) continue;
         await sender.replaceTrack(newTrack);
       }
 
@@ -998,7 +1000,9 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
           return;
         }
         const fallbackTrack = fallbackStream.getAudioTracks()[0];
-        for (const { sender } of senders) {
+        for (const { ps, sender } of senders) {
+          // Don't restore audio for selectively-muted peers
+          if (mutedForPeersRef.current.has(ps.remotePeerId)) continue;
           await sender.replaceTrack(fallbackTrack);
         }
         localStreamRef.current.removeTrack(track);

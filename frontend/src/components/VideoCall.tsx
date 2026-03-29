@@ -43,6 +43,8 @@ interface VideoCallProps {
   locallyMutedPeers: Set<string>;
   onToggleLocalMutePeer: (peerId: string) => void;
   localDisplayName?: string;
+  localProfilePic?: string;
+  peerAvatars?: Map<string, string>;
 }
 
 export default function VideoCall({
@@ -81,6 +83,8 @@ export default function VideoCall({
   locallyMutedPeers,
   onToggleLocalMutePeer,
   localDisplayName,
+  localProfilePic,
+  peerAvatars,
 }: VideoCallProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -132,6 +136,7 @@ export default function VideoCall({
               localStream={localStream}
               localSpeaking={localSpeaking}
               localHasVideo={!!hasVideo}
+              screenStream={screenStream}
               peers={peers}
               peerSpeaking={peerSpeaking}
               peerNames={peerNames}
@@ -143,6 +148,8 @@ export default function VideoCall({
               onToggleLocalMutePeer={onToggleLocalMutePeer}
               streamRevision={streamRevision}
               localDisplayName={localDisplayName}
+              localProfilePic={localProfilePic}
+              peerAvatars={peerAvatars}
             />
             {connectionType && (
               <span className={`connection-type ${connectionType === "relay" ? "relay" : ""}`}>

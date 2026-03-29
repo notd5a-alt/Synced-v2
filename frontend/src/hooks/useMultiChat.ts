@@ -47,6 +47,9 @@ export interface MultiChatHook {
   /** Per-peer display names */
   peerNames: Map<string, string>;
   sendDisplayName: (name: string) => void;
+  /** Per-peer profile pictures (data URLs) */
+  peerAvatars: Map<string, string>;
+  sendProfilePic: (dataUrl: string) => void;
 }
 
 // M7: Max message length to prevent data channel buffer overflow
@@ -63,6 +66,7 @@ export default function useMultiChat(
   const [peersAudioState, setPeersAudioState] = useState<Map<string, PeerAudioState>>(new Map());
   const [peersMutedForMe, setPeersMutedForMe] = useState<Map<string, boolean>>(new Map());
   const [peerNames, setPeerNames] = useState<Map<string, string>>(new Map());
+  const [peerAvatars, setPeerAvatars] = useState<Map<string, string>>(new Map());
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const peerTypingTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const lastTypingSentRef = useRef(false);
@@ -189,6 +193,15 @@ export default function useMultiChat(
             setPeerNames((prev) => {
               const next = new Map(prev);
               next.set(peerId, parsed.name.slice(0, 32));
+              return next;
+            });
+          } else if (parsed.type === "profile-pic") {
+            if (typeof parsed.data !== "string") return;
+            // Accept only small data URLs (max ~50KB base64)
+            if (parsed.data.length > 70000) return;
+            setPeerAvatars((prev) => {
+              const next = new Map(prev);
+              next.set(peerId, parsed.data);
               return next;
             });
           }
@@ -318,6 +331,13 @@ export default function useMultiChat(
     });
   }, [forEachChannel]);
 
+  const sendProfilePic = useCallback((dataUrl: string) => {
+    if (dataUrl.length > 70000) return; // ~50KB limit
+    forEachChannel((ch, key) => {
+      signAndSend(ch, key, { type: "profile-pic", data: dataUrl }).catch(() => {});
+    });
+  }, [forEachChannel]);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     setPeerMsgSeq(0);
@@ -327,6 +347,7 @@ export default function useMultiChat(
     setPeersAudioState(new Map());
     setPeersMutedForMe(new Map());
     setPeerNames(new Map());
+    setPeerAvatars(new Map());
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     for (const t of peerTypingTimeoutsRef.current.values()) clearTimeout(t);
     peerTypingTimeoutsRef.current.clear();
@@ -373,5 +394,7 @@ export default function useMultiChat(
     sendSelectiveMute,
     peerNames,
     sendDisplayName,
+    peerAvatars,
+    sendProfilePic,
   };
 }

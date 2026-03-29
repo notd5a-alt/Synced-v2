@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, useRef, useCallback, type FormEvent } from "react";
 import ThemeSelector from "./ThemeSelector";
 import {
   getServerMode,
@@ -18,14 +18,64 @@ interface HomeProps {
   onThemeChange: (id: string) => void;
   canvasBgId: string;
   onCanvasBgChange: (id: string) => void;
+  uiScale: number;
+  onUiScaleChange: (scale: number) => void;
   displayName: string;
   onDisplayNameChange: (name: string) => void;
+  profilePic: string;
+  onProfilePicChange: (dataUrl: string) => void;
 }
 
-export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onThemeChange, canvasBgId, onCanvasBgChange, displayName, onDisplayNameChange }: HomeProps) {
+const MAX_AVATAR_SIZE = 128;
+const AVATAR_QUALITY = 0.7;
+
+function resizeImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement("canvas");
+      canvas.width = MAX_AVATAR_SIZE;
+      canvas.height = MAX_AVATAR_SIZE;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("No canvas context")); return; }
+      // Crop to square (center)
+      const size = Math.min(img.width, img.height);
+      const sx = (img.width - size) / 2;
+      const sy = (img.height - size) / 2;
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, MAX_AVATAR_SIZE, MAX_AVATAR_SIZE);
+      resolve(canvas.toDataURL("image/jpeg", AVATAR_QUALITY));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Failed to load image")); };
+    img.src = url;
+  });
+}
+
+export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onThemeChange, canvasBgId, onCanvasBgChange, uiScale, onUiScaleChange, displayName, onDisplayNameChange, profilePic, onProfilePicChange }: HomeProps) {
   const [joinCode, setJoinCode] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [serverMode, setServerModeState] = useState<ServerMode>(getServerMode);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAvatarPick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file);
+      onProfilePicChange(dataUrl);
+      localStorage.setItem("synced-profile-pic", dataUrl);
+    } catch (err) {
+      console.error("Failed to process avatar:", err);
+    }
+    // Reset so the same file can be re-selected
+    e.target.value = "";
+  }, [onProfilePicChange]);
+
+  const handleAvatarRemove = useCallback(() => {
+    onProfilePicChange("");
+    localStorage.removeItem("synced-profile-pic");
+  }, [onProfilePicChange]);
 
   const handleModeChange = (mode: ServerMode) => {
     setServerModeState(mode);
@@ -39,18 +89,43 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
       <p className="subtitle">Encrypted peer-to-peer communication. No accounts. No traces.</p>
 
       <div className="home-actions">
-        <input
-          type="text"
-          className="name-input"
-          placeholder="Your name"
-          value={displayName}
-          onChange={(e) => {
-            const name = e.target.value.slice(0, 32);
-            onDisplayNameChange(name);
-            localStorage.setItem(DISPLAY_NAME_KEY, name);
-          }}
-          maxLength={32}
-        />
+        <div className="profile-row">
+          <button
+            className="avatar-picker"
+            onClick={() => fileInputRef.current?.click()}
+            title={profilePic ? "Change profile picture" : "Add profile picture"}
+          >
+            {profilePic ? (
+              <img src={profilePic} alt="Avatar" className="avatar-preview" />
+            ) : (
+              <span className="avatar-placeholder">+</span>
+            )}
+          </button>
+          {profilePic && (
+            <button className="btn small avatar-remove" onClick={handleAvatarRemove} title="Remove picture">
+              X
+            </button>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={handleAvatarPick}
+          />
+          <input
+            type="text"
+            className="name-input"
+            placeholder="Your name"
+            value={displayName}
+            onChange={(e) => {
+              const name = e.target.value.slice(0, 32);
+              onDisplayNameChange(name);
+              localStorage.setItem(DISPLAY_NAME_KEY, name);
+            }}
+            maxLength={32}
+          />
+        </div>
 
         <button className="btn primary" onClick={onCreateRoom}>
           Create Room
@@ -120,7 +195,7 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
         </div>
       )}
 
-      <ThemeSelector currentTheme={themeId} onSelect={onThemeChange} currentCanvasBg={canvasBgId} onCanvasBgSelect={onCanvasBgChange} />
+      <ThemeSelector currentTheme={themeId} onSelect={onThemeChange} currentCanvasBg={canvasBgId} onCanvasBgSelect={onCanvasBgChange} currentScale={uiScale} onScaleSelect={onUiScaleChange} />
     </div>
   );
 }

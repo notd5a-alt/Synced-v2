@@ -74,7 +74,8 @@ export type DataChannelMessage =
   | { type: "presence"; status: PresenceStatus }
   | { type: "audio-state"; muted: boolean; deafened: boolean }
   | { type: "selective-mute"; muted: boolean }
-  | { type: "display-name"; name: string };
+  | { type: "display-name"; name: string }
+  | { type: "profile-pic"; data: string };
 
 // --- File transfer ---
 
