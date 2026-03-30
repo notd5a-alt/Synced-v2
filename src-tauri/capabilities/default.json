@@ -8,6 +8,7 @@
     "shell:allow-execute",
     "dialog:allow-save",
     "fs:allow-write-file",
-    "fs:default"
+    "fs:default",
+    "updater:default"
   ]
 }

@@ -11,12 +11,14 @@ import useAudioDevices from "./hooks/useAudioDevices";
 import useMicLevel from "./hooks/useMicLevel";
 import useAppState from "./hooks/useAppState";
 import type { FullResetCleanups } from "./hooks/useAppState";
+import useUpdater from "./hooks/useUpdater";
 import Home from "./components/Home";
 import Lobby from "./components/Lobby";
 import Chat from "./components/Chat";
 import VideoCall from "./components/VideoCall";
 import FileShare from "./components/FileShare";
 import ErrorBoundary from "./components/ErrorBoundary";
+import UpdateBanner from "./components/UpdateBanner";
 import ThemeSelector from "./components/ThemeSelector";
 import { playPeerConnected, playPeerDisconnected, warmUpAudio, preloadRingtone, startRingtone, stopRingtone } from "./utils/sounds";
 import { getApiBaseUrl, getWsBaseUrl } from "./config";
@@ -27,6 +29,7 @@ type Tab = "chat" | "video" | "files";
 
 export default function App() {
   const app = useAppState();
+  const updater = useUpdater();
 
   const signaling = useSignaling(app.sigUrl);
   const isHost = app.mode === "host";
@@ -458,13 +461,25 @@ export default function App() {
       .catch(() => webrtc.init(null));
   }, [webrtc.cleanup, webrtc.init, monitor.setTimeoutExpired]);
 
+  const updateBanner = updater.updateAvailable && !updater.dismissed && updater.updateInfo && (
+    <UpdateBanner
+      version={updater.updateInfo.version}
+      body={updater.updateInfo.body}
+      installing={updater.installing}
+      progress={updater.progress}
+      error={updater.error}
+      onInstall={updater.install}
+      onDismiss={updater.dismiss}
+    />
+  );
+
   if (app.screen === "home") {
-    return <div className={app.screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={app.roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} uiScale={theme.uiScale} onUiScaleChange={theme.setUiScale} displayName={app.displayName} onDisplayNameChange={app.setDisplayName} profilePic={app.profilePic} onProfilePicChange={app.setProfilePic} /></div>;
+    return <div className={app.screenClass}>{updateBanner}<Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={app.roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} uiScale={theme.uiScale} onUiScaleChange={theme.setUiScale} displayName={app.displayName} onDisplayNameChange={app.setDisplayName} profilePic={app.profilePic} onProfilePicChange={app.setProfilePic} /></div>;
   }
 
   if (app.screen === "lobby") {
     return (
-      <div className={app.screenClass}><Lobby
+      <div className={app.screenClass}>{updateBanner}<Lobby
         isHost={isHost}
         roomCode={app.roomCode}
         connectionState={webrtc.connectionState}
@@ -488,6 +503,7 @@ export default function App() {
 
   return (
     <div className={`session ${app.screenClass}`}>
+      {updateBanner}
       <header className="session-header">
         <img src="/logo.png" alt="Synced" className="header-logo" />
         <span className="brand">{"> "}SYNCED</span>

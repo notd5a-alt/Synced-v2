@@ -161,6 +161,8 @@ export interface CanvasBackground {
     backgroundSize: string;
     backgroundPosition?: string;
   };
+  /** Optional CSS class added to .video-canvas for animated/complex patterns */
+  className?: string;
 }
 
 export const canvasBackgrounds: CanvasBackground[] = [
@@ -234,6 +236,39 @@ export const canvasBackgrounds: CanvasBackground[] = [
       backgroundImage:
         "linear-gradient(var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.04)) 1px, transparent 1px), linear-gradient(var(--canvas-dot, rgba(255,255,255,0.02)) 1px, transparent 1px), linear-gradient(90deg, var(--canvas-dot, rgba(255,255,255,0.02)) 1px, transparent 1px)",
       backgroundSize: "64px 64px, 64px 64px, 16px 16px, 16px 16px",
+    },
+  },
+  {
+    id: "weave",
+    name: "Weave",
+    css: {
+      backgroundImage: [
+        "repeating-linear-gradient(45deg, #0000 calc(-650% / 13) calc(50% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(100% / 13), #0000 0 calc(150% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(200% / 13), #0000 0 calc(250% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(300% / 13))",
+        "repeating-linear-gradient(45deg, #0000 calc(-650% / 13) calc(50% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(100% / 13), #0000 0 calc(150% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(200% / 13), #0000 0 calc(250% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(300% / 13))",
+        "repeating-linear-gradient(-45deg, #0000 calc(-650% / 13) calc(50% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(100% / 13), #0000 0 calc(150% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(200% / 13), #0000 0 calc(250% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(300% / 13))",
+        "repeating-linear-gradient(-45deg, #0000 calc(-650% / 13) calc(50% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(100% / 13), #0000 0 calc(150% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(200% / 13), #0000 0 calc(250% / 13), var(--canvas-dot, rgba(255,255,255,0.06)) 0 calc(300% / 13))",
+      ].join(", "),
+      backgroundSize: "64px 64px",
+      backgroundPosition: "0px 0px, 32px 32px, 0px 0px, 32px 32px",
+    },
+  },
+  {
+    id: "shadow",
+    name: "Shadow",
+    css: {
+      backgroundImage:
+        "linear-gradient(32deg, var(--canvas-dot, rgba(255,255,255,0.06)) 30px, transparent 30px)",
+      backgroundSize: "60px 60px",
+      backgroundPosition: "-5px -5px",
+    },
+  },
+  {
+    id: "rain",
+    name: "Rain",
+    className: "canvas-bg-rain",
+    css: {
+      backgroundImage: "none",
+      backgroundSize: "auto",
     },
   },
   {
@@ -312,6 +347,10 @@ export default function useTheme() {
     root.style.setProperty("--canvas-bg-image", bg.css.backgroundImage);
     root.style.setProperty("--canvas-bg-size", bg.css.backgroundSize);
     root.style.setProperty("--canvas-bg-position", bg.css.backgroundPosition || "0 0");
+    // Toggle pattern-specific CSS classes (e.g. animated backgrounds)
+    for (const b of canvasBackgrounds) {
+      if (b.className) root.classList.toggle(b.className, b.id === canvasBgId);
+    }
     try {
       localStorage.setItem(CANVAS_BG_KEY, canvasBgId);
     } catch {
