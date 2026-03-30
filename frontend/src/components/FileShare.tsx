@@ -2,7 +2,7 @@ import { useRef, useCallback, type ChangeEvent, type DragEvent } from "react";
 import type { IncomingFile, OutgoingFile } from "../types";
 import type { SentFile } from "../hooks/useMultiFileTransfer";
 
-const isTauri = typeof window !== "undefined" && "__TAURI__" in window;
+const isTauri = typeof window !== "undefined" && ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
 async function tauriSaveFile(blobUrl: string, fileName: string): Promise<void> {
   const { save } = await import("@tauri-apps/plugin-dialog");
@@ -48,13 +48,19 @@ export default function FileShare({ incoming, outgoing, sentFiles, onSendFile, o
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleDownload = useCallback((blobUrl: string, fileName: string) => {
-    if (isTauri) {
-      tauriSaveFile(blobUrl, fileName).catch(console.error);
-    } else {
+    const browserFallback = () => {
       const a = document.createElement("a");
       a.href = blobUrl;
       a.download = fileName;
       a.click();
+    };
+    if (isTauri) {
+      tauriSaveFile(blobUrl, fileName).catch((err) => {
+        console.error("Tauri save dialog failed, falling back to browser download:", err);
+        browserFallback();
+      });
+    } else {
+      browserFallback();
     }
   }, []);
 

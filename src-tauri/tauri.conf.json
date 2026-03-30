@@ -6,7 +6,8 @@
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
     "devUrl": "http://localhost:9876",
-    "frontendDist": "../backend/static"
+    "frontendDist": "../backend/static",
+    "withGlobalTauri": true
   },
   "app": {
     "security": {
