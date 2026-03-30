@@ -9,6 +9,8 @@ import useMultiVAD from "./hooks/useMultiVAD";
 import useTheme from "./hooks/useTheme";
 import useAudioDevices from "./hooks/useAudioDevices";
 import useMicLevel from "./hooks/useMicLevel";
+import useAppState from "./hooks/useAppState";
+import type { FullResetCleanups } from "./hooks/useAppState";
 import Home from "./components/Home";
 import Lobby from "./components/Lobby";
 import Chat from "./components/Chat";
@@ -21,38 +23,17 @@ import { getApiBaseUrl, getWsBaseUrl } from "./config";
 import type { PresenceStatus } from "./types";
 import "./styles/index.css";
 
-type Screen = "home" | "lobby" | "session";
-type Mode = "host" | "join" | null;
 type Tab = "chat" | "video" | "files";
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("home");
-  const [screenAnim, setScreenAnim] = useState<"enter" | "exit" | "">("");
-  const pendingScreenRef = useRef<Screen | null>(null);
-  const [mode, setMode] = useState<Mode>(null);
-  const [sigUrl, setSigUrl] = useState<string | null>(null);
-  const [roomCode, setRoomCode] = useState<string | null>(null);
-  const [roomError, setRoomError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("chat");
-  const [deafened, setDeafened] = useState(false);
-  const [locallyMutedPeers, setLocallyMutedPeers] = useState<Set<string>>(new Set());
-  const [fingerprint, setFingerprint] = useState<string | null>(null);
-  const [showThemePanel, setShowThemePanel] = useState(false);
-  const [displayName, setDisplayName] = useState(
-    () => localStorage.getItem("synced-display-name") || "",
-  );
-  const [profilePic, setProfilePic] = useState(
-    () => localStorage.getItem("synced-profile-pic") || "",
-  );
-  const sigConnectedRef = useRef(false);
-  const nsAutoEnabledRef = useRef(false);
+  const app = useAppState();
 
-  const signaling = useSignaling(sigUrl);
-  const isHost = mode === "host";
+  const signaling = useSignaling(app.sigUrl);
+  const isHost = app.mode === "host";
   const webrtc = useWebRTC(signaling);
   const theme = useTheme();
   const monitor = useConnectionMonitor(webrtc.peers, signaling.state);
-  const chat = useMultiChat(webrtc.peers, displayName, profilePic);
+  const chat = useMultiChat(webrtc.peers, app.displayName, app.profilePic);
   const files = useMultiFileTransfer(webrtc.peers);
   const vad = useMultiVAD(webrtc.localStream, webrtc.peers);
   const remoteAudioRef = useRef<HTMLVideoElement | null>(null);
@@ -72,67 +53,58 @@ export default function App() {
   // srcObject here, as that would create a second audio path that bypasses
   // per-peer local muting.
 
+  // Stable cleanup callbacks for fullReset
+  const resetCleanups = useRef<FullResetCleanups>({
+    cleanupNoiseSuppression: noiseSuppression.teardown,
+    cleanupWebRTC: webrtc.cleanup,
+    clearPersistentAudio: () => {
+      if (persistentAudioRef.current) {
+        persistentAudioRef.current.srcObject = null;
+      }
+    },
+    disconnectSignaling: signaling.disconnect,
+    clearChatMessages: chat.clearMessages,
+  });
+  resetCleanups.current = {
+    cleanupNoiseSuppression: noiseSuppression.teardown,
+    cleanupWebRTC: webrtc.cleanup,
+    clearPersistentAudio: () => {
+      if (persistentAudioRef.current) {
+        persistentAudioRef.current.srcObject = null;
+      }
+    },
+    disconnectSignaling: signaling.disconnect,
+    clearChatMessages: chat.clearMessages,
+  };
+
   // Full state reset — shared by handleDisconnect and peer-disconnect effect.
   // Idempotent: webrtc.cleanup() no-ops if PC is already null.
   const fullReset = useCallback(() => {
-    nsAutoEnabledRef.current = false;
-    noiseSuppression.teardown();
-    webrtc.cleanup();
-    // Immediately stop remote audio playback — don't wait for React's effect cycle
-    if (persistentAudioRef.current) {
-      persistentAudioRef.current.srcObject = null;
-    }
-    signaling.disconnect();
-    setScreen("home");
-    setScreenAnim("enter");
-    setTimeout(() => setScreenAnim(""), 250);
-    setMode(null);
-    setSigUrl(null);
-    setRoomCode(null);
-    setRoomError(null);
-    setFingerprint(null);
-    chat.clearMessages();
-    setActiveTab("chat");
-    setLastSeenSeq(0);
-    setUnreadDismissed(false);
-    setLocallyMutedPeers(new Set());
-  }, [webrtc.cleanup, signaling.disconnect, chat.clearMessages, noiseSuppression.teardown]);
+    app.fullReset(resetCleanups.current);
+  }, [app.fullReset]);
 
-  // Animated screen transition — exit current screen, then enter the next
-  const changeScreen = useCallback((next: Screen) => {
-    if (screen === next || pendingScreenRef.current) return;
-    setScreenAnim("exit");
-    pendingScreenRef.current = next;
-    setTimeout(() => {
-      setScreen(next);
-      setScreenAnim("enter");
-      pendingScreenRef.current = null;
-      setTimeout(() => setScreenAnim(""), 250);
-    }, 150);
-  }, [screen]);
-
-  // Transition to session once any peer connects
+  // Animated screen transition to session once any peer connects
   const prevPeerCountRef = useRef(0);
   useEffect(() => {
-    if (webrtc.peerCount > 0 && screen === "lobby") {
-      changeScreen("session");
-      setFingerprint(webrtc.getFingerprint());
+    if (webrtc.peerCount > 0 && app.screen === "lobby") {
+      app.changeScreen("session");
+      app.setFingerprint(webrtc.getFingerprint());
       playPeerConnected();
     }
     // Play sound when a new peer joins mid-session
-    if (screen === "session" && webrtc.peerCount > prevPeerCountRef.current && prevPeerCountRef.current > 0) {
+    if (app.screen === "session" && webrtc.peerCount > prevPeerCountRef.current && prevPeerCountRef.current > 0) {
       playPeerConnected();
     }
     // Play sound when a peer leaves (but session continues if others remain)
-    if (screen === "session" && webrtc.peerCount < prevPeerCountRef.current && webrtc.peerCount > 0) {
+    if (app.screen === "session" && webrtc.peerCount < prevPeerCountRef.current && webrtc.peerCount > 0) {
       playPeerDisconnected();
     }
     prevPeerCountRef.current = webrtc.peerCount;
-  }, [webrtc.peerCount, screen, webrtc.getFingerprint, changeScreen]);
+  }, [webrtc.peerCount, app.screen, webrtc.getFingerprint, app.changeScreen, app.setFingerprint]);
 
   // Handle all peers gone during session — return to home
   useEffect(() => {
-    if (screen === "session" && webrtc.peerCount === 0) {
+    if (app.screen === "session" && webrtc.peerCount === 0) {
       // All peers disconnected — only reset if we were previously connected
       // (prevPeerCountRef > 0 means we had peers, now they're all gone)
       if (prevPeerCountRef.current > 0 || webrtc.connectionState === "new") {
@@ -140,16 +112,16 @@ export default function App() {
         fullReset();
       }
     }
-  }, [webrtc.peerCount, webrtc.connectionState, screen, fullReset]);
+  }, [webrtc.peerCount, webrtc.connectionState, app.screen, fullReset]);
 
   // Note: display name and profile pic are sent automatically by useMultiChat
   // when channels open and when values change mid-session.
   // Signaling-level metadata (for lobby/API) is sent on connect and on change.
   useEffect(() => {
-    if (signaling.state === "open" && (displayName || profilePic)) {
-      signaling.send({ type: "set-meta", name: displayName, avatar: profilePic });
+    if (signaling.state === "open" && (app.displayName || app.profilePic)) {
+      signaling.send({ type: "set-meta", name: app.displayName, avatar: app.profilePic });
     }
-  }, [displayName, profilePic, signaling.state, signaling.send]);
+  }, [app.displayName, app.profilePic, signaling.state, signaling.send]);
 
   const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
 
@@ -160,15 +132,15 @@ export default function App() {
 
   // Lazy-load RNNoise WASM only when user opens the Call tab
   useEffect(() => {
-    if (activeTab === "video") {
+    if (app.activeTab === "video") {
       preloadRnnoise();
     }
-  }, [activeTab]);
+  }, [app.activeTab]);
 
   // Auto-enable AI noise suppression once when a call starts
   useEffect(() => {
-    if (nsAutoEnabledRef.current || noiseSuppression.enabled || !webrtc.localStream) return;
-    nsAutoEnabledRef.current = true;
+    if (app.nsAutoEnabledRef.current || noiseSuppression.enabled || !webrtc.localStream) return;
+    app.nsAutoEnabledRef.current = true;
     const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
     if (track) {
       noiseSuppression.toggle(track, webrtc.pcRef, webrtc.localStreamRef).then((newTrack) => {
@@ -184,42 +156,42 @@ export default function App() {
     // Defensive: tear down any leftover state from a previous session
     fullReset();
     warmUpAudio();
-    setMode("host");
-    setRoomError(null);
+    app.setMode("host");
+    app.setRoomError(null);
     try {
       const res = await fetch(`${getApiBaseUrl()}/api/rooms`, { method: "POST" });
       if (!res.ok) throw new Error("Server at capacity");
       const { room_code, token } = await res.json();
-      setRoomCode(room_code);
+      app.setRoomCode(room_code);
       const wsUrl = `${getWsBaseUrl()}/ws/${room_code}?token=${encodeURIComponent(token)}`;
-      setSigUrl(wsUrl);
-      changeScreen("lobby");
+      app.setSigUrl(wsUrl);
+      app.changeScreen("lobby");
     } catch (err) {
-      setRoomError(err instanceof Error ? err.message : "Failed to create room");
-      setMode(null);
+      app.setRoomError(err instanceof Error ? err.message : "Failed to create room");
+      app.setMode(null);
     }
-  }, [fullReset, changeScreen]);
+  }, [fullReset, app.changeScreen, app.setMode, app.setRoomError, app.setRoomCode, app.setSigUrl]);
 
   const handleJoinRoom = useCallback(async (code: string) => {
     // Defensive: tear down any leftover state from a previous session
     fullReset();
     warmUpAudio();
-    setMode("join");
-    setRoomError(null);
+    app.setMode("join");
+    app.setRoomError(null);
     const upper = code.toUpperCase().trim();
 
     // Backward compat: if contains ":", treat as IP:port (old direct-connect flow)
     if (upper.includes(":")) {
       const proto = upper === window.location.host ? wsProto : "ws";
-      setSigUrl(`${proto}://${upper}/ws`);
-      changeScreen("lobby");
+      app.setSigUrl(`${proto}://${upper}/ws`);
+      app.changeScreen("lobby");
       return;
     }
 
     // Validate room code format before any network calls (URL safety + enumeration defense)
     if (!/^[A-HJKL-NP-Z2-9]{6}$/.test(upper)) {
-      setRoomError("Invalid room code. Codes are 6 characters (letters and numbers).");
-      setMode(null);
+      app.setRoomError("Invalid room code. Codes are 6 characters (letters and numbers).");
+      app.setMode(null);
       return;
     }
 
@@ -228,37 +200,37 @@ export default function App() {
       const res = await fetch(`${getApiBaseUrl()}/api/rooms/${upper}`);
       const data = await res.json();
       if (!data.exists) {
-        setRoomError("Room not found. Check the code and try again.");
-        setMode(null);
+        app.setRoomError("Room not found. Check the code and try again.");
+        app.setMode(null);
         return;
       }
       if (!data.joinable) {
-        setRoomError("Room is full.");
-        setMode(null);
+        app.setRoomError("Room is full.");
+        app.setMode(null);
         return;
       }
       roomToken = data.token || "";
     } catch {
-      setRoomError("Could not reach signaling server.");
-      setMode(null);
+      app.setRoomError("Could not reach signaling server.");
+      app.setMode(null);
       return;
     }
 
-    setRoomCode(upper);
-    setSigUrl(`${getWsBaseUrl()}/ws/${upper}?token=${encodeURIComponent(roomToken)}`);
-    changeScreen("lobby");
-  }, [fullReset, wsProto, changeScreen]);
+    app.setRoomCode(upper);
+    app.setSigUrl(`${getWsBaseUrl()}/ws/${upper}?token=${encodeURIComponent(roomToken)}`);
+    app.changeScreen("lobby");
+  }, [fullReset, wsProto, app.changeScreen, app.setMode, app.setRoomError, app.setRoomCode, app.setSigUrl]);
 
   // Connect signaling once URL is set (only once per sigUrl to avoid infinite reconnect loop)
   useEffect(() => {
-    if (sigUrl && signaling.state === "closed" && !sigConnectedRef.current) {
-      sigConnectedRef.current = true;
+    if (app.sigUrl && signaling.state === "closed" && !app.sigConnectedRef.current) {
+      app.sigConnectedRef.current = true;
       signaling.connect();
     }
-    if (!sigUrl) {
-      sigConnectedRef.current = false;
+    if (!app.sigUrl) {
+      app.sigConnectedRef.current = false;
     }
-  }, [sigUrl, signaling.state, signaling.connect]);
+  }, [app.sigUrl, signaling.state, signaling.connect, app.sigConnectedRef]);
 
   // Init WebRTC once signaling is open — fetch ICE config from backend first.
   // Only fires when signaling.state transitions to "open" (initial connect or
@@ -317,7 +289,7 @@ export default function App() {
   }, [hasRemoteTracks]);
 
   const incomingCall = hasRemoteTracks && !webrtc.localStream && !wasInCallRef.current && !callRejected;
-  const outgoingRinging = screen === "session"
+  const outgoingRinging = app.screen === "session"
     && !!webrtc.localStream
     && !hasRemoteTracks
     && !peerEverJoinedCallRef.current;
@@ -331,34 +303,31 @@ export default function App() {
   }, [ringing]);
 
   // Unread message notification when not on chat tab
-  const [lastSeenSeq, setLastSeenSeq] = useState(0);
-  const [unreadDismissed, setUnreadDismissed] = useState(false);
-
-  const unreadCount = chat.peerMsgSeq - lastSeenSeq;
+  const unreadCount = chat.peerMsgSeq - app.lastSeenSeq;
 
   // Mark all as read when switching to chat tab
   useEffect(() => {
-    if (activeTab === "chat") {
-      setLastSeenSeq(chat.peerMsgSeq);
-      setUnreadDismissed(false);
+    if (app.activeTab === "chat") {
+      app.setLastSeenSeq(chat.peerMsgSeq);
+      app.setUnreadDismissed(false);
     }
-  }, [activeTab, chat.peerMsgSeq]);
+  }, [app.activeTab, chat.peerMsgSeq, app.setLastSeenSeq, app.setUnreadDismissed]);
 
   // Reset dismissed flag when new messages arrive after dismiss
   useEffect(() => {
-    if (unreadCount > 0 && unreadDismissed) {
-      setUnreadDismissed(false);
+    if (unreadCount > 0 && app.unreadDismissed) {
+      app.setUnreadDismissed(false);
     }
   }, [chat.peerMsgSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hasUnread = unreadCount > 0 && activeTab !== "chat" && !unreadDismissed;
+  const hasUnread = unreadCount > 0 && app.activeTab !== "chat" && !app.unreadDismissed;
 
   // Presence detection: online / idle / away
   const presenceRef = useRef<PresenceStatus>("online");
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (screen !== "session") return;
+    if (app.screen !== "session") return;
 
     const sendIfChanged = (status: PresenceStatus) => {
       if (presenceRef.current !== status) {
@@ -402,7 +371,7 @@ export default function App() {
       window.removeEventListener("mousemove", handleActivity);
       window.removeEventListener("keydown", handleActivity);
     };
-  }, [screen, chat.sendPresence, webrtc.chatChannel]);
+  }, [app.screen, chat.sendPresence, webrtc.chatChannel]);
 
   // Command palette — handles /slash commands from chat input
   const [cmdOutput, setCmdOutput] = useState<string | null>(null);
@@ -419,12 +388,12 @@ export default function App() {
         output = "Messages cleared.";
         break;
       case "/fingerprint":
-        output = fingerprint
-          ? `DTLS Fingerprint:\n${fingerprint}`
+        output = app.fingerprint
+          ? `DTLS Fingerprint:\n${app.fingerprint}`
           : "No fingerprint available (not connected).";
         break;
       case "/diag":
-        setActiveTab("video");
+        app.setActiveTab("video");
         output = "Switched to Call tab. Click [ DIAG ] to view diagnostics.";
         break;
       case "/stats": {
@@ -473,7 +442,7 @@ export default function App() {
       if (cmdOutputTimerRef.current) clearTimeout(cmdOutputTimerRef.current);
       cmdOutputTimerRef.current = setTimeout(() => setCmdOutput(null), 8000);
     }
-  }, [fingerprint, monitor.stats, monitor.connectionQuality, monitor.connectionType, isHost, chat.peerPresence, chat.clearMessages, theme]);
+  }, [app.fingerprint, app.setActiveTab, monitor.stats, monitor.connectionQuality, monitor.connectionType, isHost, chat.peerPresence, chat.clearMessages, theme]);
 
   const handleDisconnect = useCallback(() => {
     fullReset();
@@ -489,20 +458,18 @@ export default function App() {
       .catch(() => webrtc.init(null));
   }, [webrtc.cleanup, webrtc.init, monitor.setTimeoutExpired]);
 
-  const screenClass = screenAnim === "exit" ? "screen-exit" : screenAnim === "enter" ? "screen-enter" : "";
-
-  if (screen === "home") {
-    return <div className={screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} uiScale={theme.uiScale} onUiScaleChange={theme.setUiScale} displayName={displayName} onDisplayNameChange={setDisplayName} profilePic={profilePic} onProfilePicChange={setProfilePic} /></div>;
+  if (app.screen === "home") {
+    return <div className={app.screenClass}><Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} roomError={app.roomError} themeId={theme.themeId} onThemeChange={theme.setTheme} canvasBgId={theme.canvasBgId} onCanvasBgChange={theme.setCanvasBg} uiScale={theme.uiScale} onUiScaleChange={theme.setUiScale} displayName={app.displayName} onDisplayNameChange={app.setDisplayName} profilePic={app.profilePic} onProfilePicChange={app.setProfilePic} /></div>;
   }
 
-  if (screen === "lobby") {
+  if (app.screen === "lobby") {
     return (
-      <div className={screenClass}><Lobby
+      <div className={app.screenClass}><Lobby
         isHost={isHost}
-        roomCode={roomCode}
+        roomCode={app.roomCode}
         connectionState={webrtc.connectionState}
         signalingState={signaling.state}
-        signalingUrl={sigUrl}
+        signalingUrl={app.sigUrl}
         debugLog={signaling.debugLog}
         timeoutExpired={monitor.timeoutExpired}
         reconnectAttempt={signaling.reconnectAttempt}
@@ -511,8 +478,8 @@ export default function App() {
         roomPeers={signaling.roomPeers}
         peerMetas={signaling.peerMetas}
         localPeerId={signaling.peerId}
-        displayName={displayName}
-        localProfilePic={profilePic}
+        displayName={app.displayName}
+        localProfilePic={app.profilePic}
         onRetry={handleRetry}
         onCancel={handleDisconnect}
       /></div>
@@ -520,7 +487,7 @@ export default function App() {
   }
 
   return (
-    <div className={`session ${screenClass}`}>
+    <div className={`session ${app.screenClass}`}>
       <header className="session-header">
         <img src="/logo.png" alt="Synced" className="header-logo" />
         <span className="brand">{"> "}SYNCED</span>
@@ -533,18 +500,18 @@ export default function App() {
             {chat.peerPresence !== "online" && chat.peerPresence.toUpperCase()}
           </span>
         )}
-        {fingerprint && (
+        {app.fingerprint && (
           <span className="fingerprint" title="DTLS fingerprint — verify with your peer">
-            {fingerprint.slice(0, 20)}...
+            {app.fingerprint.slice(0, 20)}...
           </span>
         )}
-        {roomCode && (
+        {app.roomCode && (
           <span className="room-code-badge" title="Room code — share with peers to join">
-            ROOM: {roomCode}
+            ROOM: {app.roomCode}
             <button
               className="copy-room-code"
               onClick={() => {
-                navigator.clipboard.writeText(roomCode);
+                navigator.clipboard.writeText(app.roomCode!);
               }}
               title="Copy room code"
             >
@@ -554,29 +521,29 @@ export default function App() {
         )}
         <nav className="tabs">
           <button
-            className={activeTab === "chat" ? "active" : ""}
-            onClick={() => setActiveTab("chat")}
+            className={app.activeTab === "chat" ? "active" : ""}
+            onClick={() => app.setActiveTab("chat")}
           >
-            Chat{unreadCount > 0 && activeTab !== "chat" && (
+            Chat{unreadCount > 0 && app.activeTab !== "chat" && (
               <span className="tab-badge">{unreadCount}</span>
             )}
           </button>
           <button
-            className={activeTab === "video" ? "active" : ""}
-            onClick={() => setActiveTab("video")}
+            className={app.activeTab === "video" ? "active" : ""}
+            onClick={() => app.setActiveTab("video")}
           >
             Call
           </button>
           <button
-            className={activeTab === "files" ? "active" : ""}
-            onClick={() => setActiveTab("files")}
+            className={app.activeTab === "files" ? "active" : ""}
+            onClick={() => app.setActiveTab("files")}
           >
             Files
           </button>
         </nav>
         <button
-          className={`btn small ${showThemePanel ? "active" : ""}`}
-          onClick={() => setShowThemePanel((s) => !s)}
+          className={`btn small ${app.showThemePanel ? "active" : ""}`}
+          onClick={() => app.setShowThemePanel((s) => !s)}
         >
           [ STYLE ]
         </button>
@@ -585,7 +552,7 @@ export default function App() {
         </button>
       </header>
 
-      {showThemePanel && (
+      {app.showThemePanel && (
         <div className="theme-panel">
           <ThemeSelector currentTheme={theme.themeId} onSelect={theme.setTheme} currentCanvasBg={theme.canvasBgId} onCanvasBgSelect={theme.setCanvasBg} currentScale={theme.uiScale} onScaleSelect={theme.setUiScale} />
         </div>
@@ -598,7 +565,7 @@ export default function App() {
           <button
             className="btn small primary"
             onClick={() => {
-              setActiveTab("video");
+              app.setActiveTab("video");
               webrtc.startCall(false);
             }}
           >
@@ -619,13 +586,13 @@ export default function App() {
           <span className="pill-text">NEW MESSAGE{unreadCount > 1 ? `S (${unreadCount})` : ""}</span>
           <button
             className="btn small primary"
-            onClick={() => setActiveTab("chat")}
+            onClick={() => app.setActiveTab("chat")}
           >
             [ VIEW ]
           </button>
           <button
             className="btn small pill-dismiss"
-            onClick={() => { setUnreadDismissed(true); setLastSeenSeq(chat.peerMsgSeq); }}
+            onClick={() => { app.setUnreadDismissed(true); app.setLastSeenSeq(chat.peerMsgSeq); }}
           >
             [ DISMISS ]
           </button>
@@ -639,14 +606,14 @@ export default function App() {
         <PeerAudio
           key={peer.peerId}
           stream={peer.remoteStream}
-          muted={deafened || locallyMutedPeers.has(peer.peerId)}
+          muted={app.deafened || app.locallyMutedPeers.has(peer.peerId)}
         />
       ))}
       {/* Legacy ref for useAudioDevices setSinkId — no srcObject, just a target for output device */}
       <audio ref={persistentAudioRef} style={{ display: "none" }} />
 
       <main className="session-content">
-        {activeTab === "chat" && (
+        {app.activeTab === "chat" && (
           <div className="tab-content" key="chat">
           <ErrorBoundary fallback="tab">
           <Chat
@@ -661,7 +628,7 @@ export default function App() {
             peerTyping={chat.peerTyping}
             peerNames={chat.peerNames}
             peerAvatars={chat.peerAvatars}
-            localProfilePic={profilePic}
+            localProfilePic={app.profilePic}
             onSendImage={chat.sendImage}
             onSendVoice={chat.sendVoice}
             localStream={webrtc.localStream}
@@ -669,7 +636,7 @@ export default function App() {
           </ErrorBoundary>
           </div>
         )}
-        {activeTab === "video" && (
+        {app.activeTab === "video" && (
           <div className="tab-content" key="video">
           <ErrorBoundary fallback="tab">
           <VideoCall
@@ -686,7 +653,7 @@ export default function App() {
               // Broadcast new mute state — after toggle, track.enabled is the new state
               const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
               const muted = track ? !track.enabled : true;
-              chat.sendAudioState(muted, deafened);
+              chat.sendAudioState(muted, app.deafened);
             }}
             onToggleVideo={webrtc.toggleVideo}
             onShareScreen={webrtc.shareScreen}
@@ -714,7 +681,7 @@ export default function App() {
             localSpeaking={vad.localSpeaking}
             audioDevices={audioDevices}
             micLevel={micLevel}
-            deafened={deafened}
+            deafened={app.deafened}
             peersAudioState={chat.peersAudioState}
             peersMutedForMe={chat.peersMutedForMe}
             mutedForPeers={webrtc.mutedForPeers}
@@ -723,9 +690,9 @@ export default function App() {
               await webrtc.toggleMuteForPeer(peerId);
               chat.sendSelectiveMute(peerId, !wasMuted);
             }}
-            locallyMutedPeers={locallyMutedPeers}
+            locallyMutedPeers={app.locallyMutedPeers}
             onToggleLocalMutePeer={(peerId: string) => {
-              setLocallyMutedPeers((prev) => {
+              app.setLocallyMutedPeers((prev) => {
                 const next = new Set(prev);
                 if (next.has(peerId)) next.delete(peerId);
                 else next.add(peerId);
@@ -733,20 +700,20 @@ export default function App() {
               });
             }}
             onToggleDeafen={() => {
-              const newDeafened = !deafened;
-              setDeafened(newDeafened);
+              const newDeafened = !app.deafened;
+              app.setDeafened(newDeafened);
               const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
               const muted = track ? !track.enabled : true;
               chat.sendAudioState(muted, newDeafened);
             }}
-            localDisplayName={displayName}
-            localProfilePic={profilePic}
+            localDisplayName={app.displayName}
+            localProfilePic={app.profilePic}
             peerAvatars={chat.peerAvatars}
           />
           </ErrorBoundary>
           </div>
         )}
-        {activeTab === "files" && (
+        {app.activeTab === "files" && (
           <div className="tab-content" key="files">
           <ErrorBoundary fallback="tab">
           <FileShare

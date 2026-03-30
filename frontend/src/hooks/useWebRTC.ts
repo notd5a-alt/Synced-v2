@@ -2,6 +2,7 @@ import { useRef, useState, useCallback, useEffect, type MutableRefObject } from 
 import { deriveHmacKey } from "../utils/channelAuth";
 import { preferVideoCodecs, preferAudioCodecs, optimizeOpusInSDP } from "../utils/codecConfig";
 import type { SignalingHook, SignalingMessage, AudioProcessingState } from "../types";
+import useScreenShare from "./useScreenShare";
 
 const DEFAULT_ICE_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -115,12 +116,9 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
 
   // === Shared media state ===
   const localStreamRef = useRef<MediaStream | null>(null);
-  const screenStreamRef = useRef<MediaStream | null>(null);
   const cleaningUpRef = useRef(false);
-  const sharingInProgressRef = useRef(false);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
   const [streamRevision, setStreamRevision] = useState(0);
   const bumpRevision = useCallback(() => setStreamRevision((r) => r + 1), []);
@@ -129,6 +127,18 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
     echoCancellation: true,
     autoGainControl: true,
   });
+
+  // === Screen sharing (extracted hook) ===
+  const screenShare = useScreenShare(
+    signalingRef,
+    peersRef,
+    cleaningUpRef,
+    setCallError,
+    bumpRevision,
+  );
+  // Stable ref to screen share functions — avoids dependency churn in useCallbacks
+  const screenShareRef = useRef(screenShare);
+  screenShareRef.current = screenShare;
 
   // Scalar shim ref — points to the "primary" peer's PC for useConnectionMonitor
   const primaryPcRef = useRef<RTCPeerConnection | null>(null);
@@ -444,20 +454,10 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
       });
     }
 
-    // Add existing screen share tracks
-    const sStream = screenStreamRef.current;
-    if (sStream) {
-      const screenTrack = sStream.getVideoTracks()[0];
-      if (screenTrack) {
-        ps.screenVideoSender = pc.addTrack(screenTrack, sStream);
-        preferVideoCodecs(pc, "screen");
-        signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id, to: remotePeerId });
-      }
-      const audioTrack = sStream.getAudioTracks()[0];
-      if (audioTrack) {
-        ps.screenAudioSender = pc.addTrack(audioTrack, sStream);
-      }
-    }
+    // Add existing screen share tracks (delegated to useScreenShare)
+    screenShareRef.current.addScreenTracksToPeer(ps).catch((err: unknown) =>
+      console.error("addScreenTracksToPeer failed:", err)
+    );
 
     // Update primary PC ref
     primaryPcRef.current = (getPrimaryPeer() ?? ps).pc;
@@ -582,12 +582,9 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
     // Stop local media
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
-    screenStreamRef.current?.getTracks().forEach((t) => {
-      t.onended = null;
-      t.stop();
-    });
-    screenStreamRef.current = null;
-    sharingInProgressRef.current = false;
+
+    // Stop screen share (no signaling broadcast during teardown)
+    screenShareRef.current.teardown();
 
     // Destroy all peer connections
     for (const remotePeerId of [...peersRef.current.keys()]) {
@@ -599,7 +596,6 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
 
     // Reset React state
     setLocalStream(null);
-    setScreenStream(null);
     setCallError(null);
     setAudioProcessing({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
     bumpPeers();
@@ -652,26 +648,12 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
   // endCall — stop senders on all PCs
   // ---------------------------------------------------------------------------
   const endCall = useCallback(() => {
-    // Stop screen share first
-    if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach((t) => {
-        t.onended = null;
-        t.stop();
-      });
-      screenStreamRef.current = null;
-    }
+    // Stop screen share first (no signaling broadcast — just teardown)
+    screenShareRef.current.teardown();
 
     for (const ps of peersRef.current.values()) {
       const { pc } = ps;
-      // Remove screen senders
-      if (ps.screenVideoSender) {
-        try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
-        ps.screenVideoSender = null;
-      }
-      if (ps.screenAudioSender) {
-        try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
-        ps.screenAudioSender = null;
-      }
+      // Remove camera sender
       if (ps.cameraVideoSender) {
         try { pc.removeTrack(ps.cameraVideoSender); } catch { /* already removed */ }
         ps.cameraVideoSender = null;
@@ -684,140 +666,10 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
         }
       });
     }
-    sharingInProgressRef.current = false;
     localStreamRef.current = null;
     setLocalStream(null);
-    setScreenStream(null);
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // stopScreenShare — remove screen senders from all PCs
-  // ---------------------------------------------------------------------------
-  const stopScreenShare = useCallback(async () => {
-    if (!screenStreamRef.current) return;
-
-    sharingInProgressRef.current = false;
-    screenStreamRef.current.getTracks().forEach((t) => {
-      t.onended = null;
-      t.stop();
-    });
-    screenStreamRef.current = null;
-    setScreenStream(null);
-
-    for (const ps of peersRef.current.values()) {
-      const { pc } = ps;
-      if (ps.screenAudioSender) {
-        try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
-        ps.screenAudioSender = null;
-      }
-      if (ps.screenVideoSender) {
-        try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
-        ps.screenVideoSender = null;
-      }
-    }
-
-    // Broadcast stop to all peers
-    signalingRef.current.send({ type: "screen-sharing", active: false });
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // shareScreen — get display media, add to all PCs
-  // ---------------------------------------------------------------------------
-  const shareScreen = useCallback(async () => {
-    if (peersRef.current.size === 0 || sharingInProgressRef.current) return;
-
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setCallError("Screen sharing is not supported in this browser.");
-      return;
-    }
-
-    setCallError(null);
-    sharingInProgressRef.current = true;
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 60 }, cursor: "always" } as MediaTrackConstraints,
-        audio: {
-          noiseSuppression: false,
-          echoCancellation: false,
-          autoGainControl: false,
-        },
-        systemAudio: "include",
-        surfaceSwitching: "include",
-        monitorTypeSurfaces: "include",
-      } as any);
-
-      if (!sharingInProgressRef.current || cleaningUpRef.current) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
-
-      screenStreamRef.current = stream;
-      const screenTrack = stream.getVideoTracks()[0];
-
-      // Add screen track to all PCs
-      for (const ps of peersRef.current.values()) {
-        const { pc } = ps;
-        if (ps.screenVideoSender) {
-          try { pc.removeTrack(ps.screenVideoSender); } catch { /* already removed */ }
-        }
-        ps.screenVideoSender = pc.addTrack(screenTrack, stream);
-        preferVideoCodecs(pc, "screen");
-
-        // Set initial bitrate
-        if (ps.screenVideoSender) {
-          try {
-            const params = ps.screenVideoSender.getParameters();
-            if (params.encodings?.length > 0) {
-              params.encodings[0].maxBitrate = 1_500_000;
-              params.encodings[0].maxFramerate = 30;
-              (params.encodings[0] as any).degradationPreference = "maintain-framerate";
-              await ps.screenVideoSender.setParameters(params);
-            }
-          } catch { /* encoding params not supported */ }
-        }
-
-        // Add system audio if present
-        if (ps.screenAudioSender) {
-          try { pc.removeTrack(ps.screenAudioSender); } catch { /* already removed */ }
-          ps.screenAudioSender = null;
-        }
-        const audioTrack = stream.getAudioTracks()[0];
-        if (audioTrack) {
-          if ("contentHint" in audioTrack) audioTrack.contentHint = "music";
-          try {
-            ps.screenAudioSender = pc.addTrack(audioTrack, stream);
-            const params = ps.screenAudioSender.getParameters();
-            if (params.encodings?.length > 0) {
-              params.encodings[0].maxBitrate = 128_000;
-              await ps.screenAudioSender.setParameters(params);
-            }
-          } catch (err) {
-            console.error("failed to add screen audio:", err);
-          }
-        }
-      }
-
-      // Notify all peers
-      if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
-      signalingRef.current.send({ type: "screen-sharing", active: true, trackId: screenTrack.id });
-
-      screenTrack.onended = () => {
-        if (sharingInProgressRef.current) return;
-        stopScreenShare().catch((err: unknown) =>
-          console.error("stopScreenShare from onended failed:", err)
-        );
-      };
-
-      setScreenStream(stream);
-    } catch (err) {
-      const e = err as DOMException;
-      if (e.name !== "AbortError" && e.name !== "NotAllowedError") {
-        setCallError(e.message || "Failed to share screen");
-      }
-    } finally {
-      sharingInProgressRef.current = false;
-    }
-  }, [stopScreenShare]);
 
   // ---------------------------------------------------------------------------
   // Per-peer selective mute — stop sending audio to a specific peer
@@ -1165,7 +1017,7 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
 
     // Shared media
     localStream,
-    screenStream,
+    screenStream: screenShare.screenStream,
     localStreamRef,
     callError,
     audioProcessing,
@@ -1174,8 +1026,8 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
     // Media operations
     startCall,
     endCall,
-    shareScreen,
-    stopScreenShare,
+    shareScreen: screenShare.shareScreen,
+    stopScreenShare: screenShare.stopScreenShare,
     toggleAudio,
     toggleVideo,
     toggleAudioProcessing,
