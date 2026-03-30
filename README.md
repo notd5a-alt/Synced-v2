@@ -17,12 +17,12 @@ It was a nice experiment, and i enjoyed it, but i dont think id do it again xD.
 
 <table>
 <tr>
-<td align="center"><strong>Video Call</strong><br/><img width="800" alt="Video call with spatial canvas" src="SCREENSHOT_CALL_URL" /></td>
-<td align="center"><strong>Text Chat</strong><br/><img width="800" alt="Encrypted chat with read receipts" src="SCREENSHOT_CHAT_URL" /></td>
+<td align="center"><strong>Video Call</strong><br/><img width="2551" height="1261" alt="image" src="https://github.com/user-attachments/assets/e6a063ae-2c5e-45ef-ab76-a37b61a58f50" /></td>
+<td align="center"><strong>Text Chat</strong><br/><img width="2551" height="1261" alt="image" src="https://github.com/user-attachments/assets/b55e5d71-37e6-4559-ab48-0a4255b58caf" /></td>
 </tr>
 <tr>
-<td align="center"><strong>File Transfer</strong><br/><img width="800" alt="P2P file sharing" src="SCREENSHOT_FILES_URL" /></td>
-<td align="center"><strong>Themes</strong><br/><img width="800" alt="7 built-in themes with canvas backgrounds" src="SCREENSHOT_THEMES_URL" /></td>
+<td align="center"><strong>File Transfer</strong><br/><img width="2551" height="1261" alt="image" src="https://github.com/user-attachments/assets/599921e1-9f5d-4da3-9083-6dab2318962a" /></td>
+<td align="center"><strong>Themes</strong><br/><img width="2551" height="1261" alt="image" src="https://github.com/user-attachments/assets/b746ae49-a9ca-499e-b28c-5fa6753073b4" /></td>
 </tr>
 </table>
 
