@@ -15,7 +15,10 @@ const defaultProps = {
   maxReconnectAttempts: 5,
   peerCount: 0,
   roomPeers: [] as string[],
+  peerMetas: new Map(),
   localPeerId: 'aaaa-bbbb-cccc',
+  displayName: '',
+  localProfilePic: '',
   onRetry: vi.fn(),
   onCancel: vi.fn(),
 };

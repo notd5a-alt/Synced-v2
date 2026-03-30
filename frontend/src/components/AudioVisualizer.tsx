@@ -147,9 +147,10 @@ class StreamAudioAnalyzer {
 // ---------------------------------------------------------------------------
 interface AudioVisualizerProps {
   stream: MediaStream | null;
+  userColor?: string;
 }
 
-export default function AudioVisualizer({ stream }: AudioVisualizerProps) {
+export default function AudioVisualizer({ stream, userColor }: AudioVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<{
     renderer: THREE.WebGLRenderer;
@@ -185,10 +186,11 @@ export default function AudioVisualizer({ stream }: AudioVisualizerProps) {
     const holder = new THREE.Object3D();
     scene.add(holder);
 
-    // --- Read theme colors from CSS vars ---
+    // --- Read theme colors from CSS vars, override with per-user color if given ---
     const style = getComputedStyle(document.documentElement);
-    const accentHex = style.getPropertyValue("--accent").trim() || "#b400ff";
+    const baseAccent = style.getPropertyValue("--accent").trim() || "#b400ff";
     const textHex = style.getPropertyValue("--text").trim() || "#00ffff";
+    const startHex = userColor || baseAccent;
 
     // --- Shader Material ---
     const material = new THREE.ShaderMaterial({
@@ -205,7 +207,7 @@ export default function AudioVisualizer({ stream }: AudioVisualizerProps) {
         amplitude: { value: 1 },
         offsetGain: { value: 0 },
         maxDistance: { value: 1.8 },
-        startColor: { value: new THREE.Color(accentHex) },
+        startColor: { value: new THREE.Color(startHex) },
         endColor: { value: new THREE.Color(textHex) },
       },
     });
@@ -332,16 +334,17 @@ export default function AudioVisualizer({ stream }: AudioVisualizerProps) {
       }
       stateRef.current = null;
     };
-  }, [stream]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream, userColor]);
 
-  // Update theme colors reactively
+  // Update theme colors reactively (when theme changes without remount)
   useEffect(() => {
     const s = stateRef.current;
     if (!s) return;
     const style = getComputedStyle(document.documentElement);
-    const accent = style.getPropertyValue("--accent").trim() || "#b400ff";
+    const baseAccent = style.getPropertyValue("--accent").trim() || "#b400ff";
     const text = style.getPropertyValue("--text").trim() || "#00ffff";
-    s.material.uniforms.startColor.value.set(accent);
+    s.material.uniforms.startColor.value.set(userColor || baseAccent);
     s.material.uniforms.endColor.value.set(text);
   });
 

@@ -21,7 +21,7 @@ HEARTBEAT_TIMEOUT = int(os.environ.get("SYNCED_HEARTBEAT_TIMEOUT", 300))   # clo
                           # (Chrome throttles background tabs to ~1 timer/min)
 IDLE_TIMEOUT = int(os.environ.get("SYNCED_IDLE_TIMEOUT", 1800))       # close if no signaling messages in 30 minutes
 WS_ACCEPT_TIMEOUT = 10    # H1: seconds to wait for WebSocket handshake
-ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong", "screen-sharing"}
+ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong", "screen-sharing", "set-meta"}
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 32 chars, no ambiguous 0/O/1/l/I
 ROOM_CODE_LENGTH = 6
@@ -65,6 +65,7 @@ class SignalingRoom:
         self.max_peers = min(max_peers, MAX_PEERS_PER_ROOM)
         self._peers: Dict[str, WebSocket] = {}  # peerId -> WebSocket
         self._peer_order: list[str] = []         # join order (first = room creator)
+        self._peer_meta: Dict[str, dict] = {}    # peerId -> {"name": str, "avatar": str}
         self._room_token: str = ""               # shared room token — required for all connections
         self._last_pong: Dict[str, float] = {}   # peerId -> timestamp
         self._last_activity: float = time.monotonic()  # updated on real signaling messages
@@ -129,19 +130,21 @@ class SignalingRoom:
             except Exception as e:
                 logger.warning("[%s] failed to send assigned-id to %s: %s", self.room_id, peer_id[:8], e)
 
-            # Send room-state to the new peer (list of already-connected peers)
+            # Send room-state to the new peer (list of already-connected peers with metadata)
             if existing_peer_ids:
+                peer_metas = {pid: self._peer_meta.get(pid, {}) for pid in existing_peer_ids}
                 try:
-                    await ws.send_json({"type": "room-state", "peers": existing_peer_ids})
+                    await ws.send_json({"type": "room-state", "peers": existing_peer_ids, "peerMeta": peer_metas})
                 except Exception as e:
                     logger.warning("[%s] failed to send room-state to %s: %s", self.room_id, peer_id[:8], e)
 
-            # Notify all existing peers that a new peer joined
+            # Notify all existing peers that a new peer joined (include metadata if available)
+            new_peer_meta = self._peer_meta.get(peer_id, {})
             for existing_id, existing_ws in list(self._peers.items()):
                 if existing_id == peer_id:
                     continue
                 try:
-                    await existing_ws.send_json({"type": "peer-joined", "peerId": peer_id})
+                    await existing_ws.send_json({"type": "peer-joined", "peerId": peer_id, "meta": new_peer_meta})
                 except Exception as e:
                     logger.warning("[%s] failed to send peer-joined to %s: %s", self.room_id, existing_id[:8], e)
 
@@ -157,6 +160,7 @@ class SignalingRoom:
             if peer_id_to_remove:
                 del self._peers[peer_id_to_remove]
                 self._last_pong.pop(peer_id_to_remove, None)
+                self._peer_meta.pop(peer_id_to_remove, None)
                 if peer_id_to_remove in self._peer_order:
                     self._peer_order.remove(peer_id_to_remove)
                 logger.info("[%s] peer %s disconnected (%d/%d in room)",
@@ -276,6 +280,26 @@ class SignalingRoom:
                     if msg_type in {"offer", "answer", "ice-candidate", "screen-sharing"}:
                         self._last_activity = time.monotonic()
                         await self.relay(ws, data, msg, peer_id)
+                    elif msg_type == "set-meta":
+                        # Store peer metadata (display name, avatar) and broadcast to others
+                        meta: dict = {}
+                        name = msg.get("name", "")
+                        if isinstance(name, str):
+                            meta["name"] = name[:32]
+                        avatar = msg.get("avatar", "")
+                        if isinstance(avatar, str) and len(avatar) <= 70000:
+                            meta["avatar"] = avatar
+                        async with self._lock:
+                            self._peer_meta[peer_id] = meta
+                        # Broadcast updated meta to all other peers
+                        broadcast_msg = json.dumps({"type": "peer-meta", "peerId": peer_id, "meta": meta})
+                        async with self._lock:
+                            targets = [(pid, pws) for pid, pws in self._peers.items() if pid != peer_id]
+                        for tid, tws in targets:
+                            try:
+                                await tws.send_text(broadcast_msg)
+                            except Exception:
+                                pass
                     elif msg_type == "pong":
                         # Update pong timestamp for heartbeat timeout detection
                         async with self._lock:
@@ -371,17 +395,26 @@ class RoomManager:
                 return False, False
             return True, not room.is_full
 
-    async def room_info(self, room_id: str) -> tuple[bool, bool, str, int, int]:
-        """Returns (exists, joinable, token, peer_count, max_peers).
+    async def room_info(self, room_id: str) -> tuple[bool, bool, str, int, int, list]:
+        """Returns (exists, joinable, token, peer_count, max_peers, participants).
 
         Token is returned only if joinable.
+        participants is a list of {peerId, name, avatar} dicts.
         """
         async with self._lock:
             room = self._rooms.get(room_id)
             if not room:
-                return False, False, "", 0, 0
+                return False, False, "", 0, 0, []
             joinable = not room.is_full
-            return True, joinable, room._room_token if joinable else "", room.peer_count, room.max_peers
+            participants = []
+            for pid in room._peer_order:
+                meta = room._peer_meta.get(pid, {})
+                participants.append({
+                    "peerId": pid,
+                    "name": meta.get("name", ""),
+                    "avatar": meta.get("avatar", ""),
+                })
+            return True, joinable, room._room_token if joinable else "", room.peer_count, room.max_peers, participants
 
     async def get_room(self, room_id: str) -> SignalingRoom | None:
         """Return an existing room, or None if it doesn't exist.

@@ -50,6 +50,10 @@ export interface MultiChatHook {
   /** Per-peer profile pictures (data URLs) */
   peerAvatars: Map<string, string>;
   sendProfilePic: (dataUrl: string) => void;
+  /** Send an image message */
+  sendImage: (file: File) => Promise<void>;
+  /** Send a voice message */
+  sendVoice: (blob: Blob, duration: number) => Promise<void>;
 }
 
 // M7: Max message length to prevent data channel buffer overflow
@@ -57,6 +61,8 @@ const MAX_MESSAGE_LENGTH = 16000;
 
 export default function useMultiChat(
   peers: Map<string, PeerInfo>,
+  localDisplayName?: string,
+  localProfilePic?: string,
 ): MultiChatHook {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [peerMsgSeq, setPeerMsgSeq] = useState(0);
@@ -74,6 +80,10 @@ export default function useMultiChat(
   const attachedChannelsRef = useRef<Set<string>>(new Set());
   const peersRef = useRef(peers);
   peersRef.current = peers;
+  const localDisplayNameRef = useRef(localDisplayName);
+  localDisplayNameRef.current = localDisplayName;
+  const localProfilePicRef = useRef(localProfilePic);
+  localProfilePicRef.current = localProfilePic;
 
   // ---------------------------------------------------------------------------
   // Attach message handlers to new peer channels, detach from removed ones
@@ -129,6 +139,58 @@ export default function useMultiChat(
             setMessages((prev) => [
               ...prev,
               { ...parsed, from: peerId, reactions: {} },
+            ]);
+            setPeerMsgSeq((s) => s + 1);
+            playMessageReceived();
+          } else if (parsed.type === "image") {
+            if (typeof parsed.id !== "string" || typeof parsed.data !== "string") return;
+            if (parsed.data.length > 500000) return; // ~375KB max
+            // Convert base64 data URL to blob URL for efficient rendering
+            let imageUrl = parsed.data;
+            try {
+              const resp = await fetch(parsed.data);
+              const blob = await resp.blob();
+              imageUrl = URL.createObjectURL(blob);
+            } catch { /* use data URL as fallback */ }
+            setMessages((prev) => [
+              ...prev,
+              {
+                type: "image" as const,
+                id: parsed.id,
+                content: "",
+                timestamp: parsed.timestamp,
+                from: peerId,
+                reactions: {},
+                imageUrl,
+                imageWidth: parsed.width,
+                imageHeight: parsed.height,
+              },
+            ]);
+            setPeerMsgSeq((s) => s + 1);
+            playMessageReceived();
+          } else if (parsed.type === "voice") {
+            if (typeof parsed.id !== "string" || typeof parsed.data !== "string") return;
+            if (parsed.data.length > 1000000) return; // ~750KB max
+            // Convert base64 to blob URL for playback
+            let voiceBlobUrl = "";
+            try {
+              const resp = await fetch(parsed.data);
+              const blob = await resp.blob();
+              voiceBlobUrl = URL.createObjectURL(blob);
+            } catch { /* skip */ }
+            setMessages((prev) => [
+              ...prev,
+              {
+                type: "voice" as const,
+                id: parsed.id,
+                content: "",
+                timestamp: parsed.timestamp,
+                from: peerId,
+                reactions: {},
+                voiceDataUrl: parsed.data,
+                voiceBlobUrl,
+                voiceDuration: parsed.duration,
+              },
             ]);
             setPeerMsgSeq((s) => s + 1);
             playMessageReceived();
@@ -209,6 +271,14 @@ export default function useMultiChat(
       };
 
       ch.addEventListener("message", handler);
+
+      // Auto-send local display name and profile pic to the new peer
+      if (localDisplayNameRef.current) {
+        signAndSend(ch, hmacKey, { type: "display-name", name: localDisplayNameRef.current.slice(0, 32) }).catch(() => {});
+      }
+      if (localProfilePicRef.current && localProfilePicRef.current.length <= 70000) {
+        signAndSend(ch, hmacKey, { type: "profile-pic", data: localProfilePicRef.current }).catch(() => {});
+      }
 
       // Handle channel close — clean up
       const closeHandler = () => {
@@ -338,6 +408,141 @@ export default function useMultiChat(
     });
   }, [forEachChannel]);
 
+  // --- Image messages ---
+  const MAX_IMAGE_DIM = 1920;
+  const IMAGE_QUALITY = 0.8;
+
+  const sendImage = useCallback(async (file: File) => {
+    // Resize and compress the image
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let w = img.width, h = img.height;
+        if (w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM) {
+          const scale = MAX_IMAGE_DIM / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("No canvas context")); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", IMAGE_QUALITY));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Failed to load image")); };
+      img.src = url;
+    });
+
+    const id = crypto.randomUUID();
+    const timestamp = Date.now();
+
+    // Get dimensions from the data URL
+    const tmpImg = new Image();
+    const dims = await new Promise<{ width: number; height: number }>((resolve) => {
+      tmpImg.onload = () => resolve({ width: tmpImg.width, height: tmpImg.height });
+      tmpImg.onerror = () => resolve({ width: 0, height: 0 });
+      tmpImg.src = dataUrl;
+    });
+
+    // Add to local messages immediately
+    let localImageUrl = dataUrl;
+    try {
+      const resp = await fetch(dataUrl);
+      const blob = await resp.blob();
+      localImageUrl = URL.createObjectURL(blob);
+    } catch { /* fallback to data URL */ }
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: "image" as const,
+        id,
+        content: "",
+        timestamp,
+        from: "you",
+        reactions: {},
+        imageUrl: localImageUrl,
+        imageWidth: dims.width,
+        imageHeight: dims.height,
+      },
+    ]);
+    playMessageSent();
+
+    // Send to all peers
+    forEachChannel((ch, key) => {
+      signAndSend(ch, key, {
+        type: "image",
+        id,
+        data: dataUrl,
+        mimeType: "image/jpeg",
+        width: dims.width,
+        height: dims.height,
+        timestamp,
+      }).catch(() => {});
+    });
+  }, [forEachChannel]);
+
+  // --- Voice messages ---
+  const sendVoice = useCallback(async (blob: Blob, duration: number) => {
+    // Convert blob to base64 data URL
+    const dataUrl = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.readAsDataURL(blob);
+    });
+
+    const id = crypto.randomUUID();
+    const timestamp = Date.now();
+    const blobUrl = URL.createObjectURL(blob);
+
+    // Add to local messages immediately
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: "voice" as const,
+        id,
+        content: "",
+        timestamp,
+        from: "you",
+        reactions: {},
+        voiceDataUrl: dataUrl,
+        voiceBlobUrl: blobUrl,
+        voiceDuration: duration,
+      },
+    ]);
+    playMessageSent();
+
+    // Send to all peers
+    forEachChannel((ch, key) => {
+      signAndSend(ch, key, {
+        type: "voice",
+        id,
+        data: dataUrl,
+        duration,
+        mimeType: blob.type || "audio/webm",
+        timestamp,
+      }).catch(() => {});
+    });
+  }, [forEachChannel]);
+
+  // Broadcast name/pic changes mid-session to all connected peers
+  const prevNameRef = useRef(localDisplayName);
+  const prevPicRef = useRef(localProfilePic);
+  useEffect(() => {
+    if (localDisplayName !== prevNameRef.current) {
+      prevNameRef.current = localDisplayName;
+      if (localDisplayName) sendDisplayName(localDisplayName);
+    }
+    if (localProfilePic !== prevPicRef.current) {
+      prevPicRef.current = localProfilePic;
+      if (localProfilePic) sendProfilePic(localProfilePic);
+    }
+  }, [localDisplayName, localProfilePic, sendDisplayName, sendProfilePic]);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     setPeerMsgSeq(0);
@@ -396,5 +601,7 @@ export default function useMultiChat(
     sendDisplayName,
     peerAvatars,
     sendProfilePic,
+    sendImage,
+    sendVoice,
   };
 }

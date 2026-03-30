@@ -183,10 +183,13 @@ async def check_room(code: str):
     upper = code.upper().strip()
     if not _ROOM_CODE_RE.match(upper):
         return {"exists": False, "joinable": False}
-    exists, joinable, token, peer_count, max_peers = await manager.room_info(upper)
+    exists, joinable, token, peer_count, max_peers, participants = await manager.room_info(upper)
     resp: dict = {"exists": exists, "joinable": joinable, "peer_count": peer_count, "max_peers": max_peers}
     if joinable and token:
         resp["token"] = token
+    if exists:
+        # Include participant info (names only — avatars omitted from REST to keep response small)
+        resp["participants"] = [{"peerId": p["peerId"], "name": p["name"]} for p in participants]
     return resp
 
 

@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from "react";
-import type { SignalingState, SignalingMessage, SignalingHook } from "../types";
+import type { SignalingState, SignalingMessage, SignalingHook, PeerMeta } from "../types";
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_DELAY = 1000; // ms, doubles each attempt, max 30s
@@ -16,6 +16,7 @@ export default function useSignaling(url: string | null): SignalingHook {
   const [state, setState] = useState<SignalingState>("closed");
   const [peerId, setPeerId] = useState<string | null>(null);
   const [roomPeers, setRoomPeers] = useState<string[]>([]);
+  const [peerMetas, setPeerMetas] = useState<Map<string, PeerMeta>>(new Map());
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
 
@@ -122,13 +123,29 @@ export default function useSignaling(url: string | null): SignalingHook {
           setPeerId(msg.peerId);
           return;
         }
-        // Track room state and peer list (also pass through to handler)
+        // Track room state, peer list, and metadata (also pass through to handler)
         if (msg.type === "room-state") {
           setRoomPeers(msg.peers);
+          // Populate peer metadata from room-state
+          if (msg.peerMeta) {
+            setPeerMetas((prev) => {
+              const next = new Map(prev);
+              for (const [pid, meta] of Object.entries(msg.peerMeta!)) {
+                if (meta.name || meta.avatar) next.set(pid, meta);
+              }
+              return next;
+            });
+          }
         } else if (msg.type === "peer-joined") {
           setRoomPeers((prev) => prev.includes(msg.peerId) ? prev : [...prev, msg.peerId]);
+          if (msg.meta && (msg.meta.name || msg.meta.avatar)) {
+            setPeerMetas((prev) => { const next = new Map(prev); next.set(msg.peerId, msg.meta!); return next; });
+          }
         } else if (msg.type === "peer-disconnected") {
           setRoomPeers((prev) => prev.filter((id) => id !== msg.peerId));
+          setPeerMetas((prev) => { const next = new Map(prev); next.delete(msg.peerId); return next; });
+        } else if (msg.type === "peer-meta") {
+          setPeerMetas((prev) => { const next = new Map(prev); next.set(msg.peerId, msg.meta); return next; });
         }
         addLog(`WS recv: ${msg.type}`);
         if (onMessageRef.current) {
@@ -177,6 +194,7 @@ export default function useSignaling(url: string | null): SignalingHook {
     onMessageRef.current = null;
     setPeerId(null);
     setRoomPeers([]);
+    setPeerMetas(new Map());
     setState("closed");
   }, []);
 
@@ -197,7 +215,7 @@ export default function useSignaling(url: string | null): SignalingHook {
   }, []);
 
   return useMemo(
-    () => ({ connect, send, disconnect, onMessage, state, peerId, roomPeers, debugLog, addLog, reconnectAttempt, maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS }),
-    [connect, send, disconnect, onMessage, state, peerId, roomPeers, debugLog, addLog, reconnectAttempt]
+    () => ({ connect, send, disconnect, onMessage, state, peerId, roomPeers, peerMetas, debugLog, addLog, reconnectAttempt, maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS }),
+    [connect, send, disconnect, onMessage, state, peerId, roomPeers, peerMetas, debugLog, addLog, reconnectAttempt]
   );
 }

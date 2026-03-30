@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import type { SignalingState } from "../types";
+import type { SignalingState, PeerMeta } from "../types";
 
 const SPINNER_CHARS = ["|", "/", "-", "\\"];
 const MAX_PEERS = 8;
@@ -16,8 +16,10 @@ interface LobbyProps {
   maxReconnectAttempts: number;
   peerCount: number;
   roomPeers: string[];
+  peerMetas: Map<string, PeerMeta>;
   localPeerId: string | null;
   displayName: string;
+  localProfilePic: string;
   onRetry: () => void;
   onCancel: () => void;
 }
@@ -34,8 +36,10 @@ export default function Lobby({
   maxReconnectAttempts,
   peerCount,
   roomPeers,
+  peerMetas,
   localPeerId,
   displayName,
+  localProfilePic,
   onRetry,
   onCancel,
 }: LobbyProps) {
@@ -105,14 +109,19 @@ export default function Lobby({
           <div className="lobby-peers-list">
             {localPeerId && (
               <div className="lobby-peer-item you">
+                {localProfilePic && <img src={localProfilePic} alt="" className="lobby-peer-avatar" />}
                 {displayName || localPeerId.slice(0, 8)} (you)
               </div>
             )}
-            {roomPeers.map((id) => (
-              <div key={id} className="lobby-peer-item">
-                {id.slice(0, 8)}
-              </div>
-            ))}
+            {roomPeers.map((id) => {
+              const meta = peerMetas.get(id);
+              return (
+                <div key={id} className="lobby-peer-item">
+                  {meta?.avatar && <img src={meta.avatar} alt="" className="lobby-peer-avatar" />}
+                  {meta?.name || id.slice(0, 8)}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

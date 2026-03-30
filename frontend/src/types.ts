@@ -4,14 +4,21 @@
 
 export type SignalingState = "closed" | "connecting" | "open" | "reconnecting";
 
+export interface PeerMeta {
+  name?: string;
+  avatar?: string;
+}
+
 export type SignalingMessage =
   | { type: "offer"; sdp?: string; candidate?: never; from?: string; to?: string }
   | { type: "answer"; sdp?: string; candidate?: never; from?: string; to?: string }
   | { type: "ice-candidate"; candidate?: RTCIceCandidateInit; sdp?: never; from?: string; to?: string }
-  | { type: "peer-joined"; peerId: string }
+  | { type: "peer-joined"; peerId: string; meta?: PeerMeta }
   | { type: "peer-disconnected"; peerId: string }
   | { type: "assigned-id"; peerId: string }
-  | { type: "room-state"; peers: string[] }
+  | { type: "room-state"; peers: string[]; peerMeta?: Record<string, PeerMeta> }
+  | { type: "peer-meta"; peerId: string; meta: PeerMeta }
+  | { type: "set-meta"; name?: string; avatar?: string }
   | { type: "ping" }
   | { type: "pong" }
   | { type: "screen-sharing"; active: boolean; trackId?: string; from?: string; to?: string };
@@ -24,6 +31,7 @@ export interface SignalingHook {
   state: SignalingState;
   peerId: string | null;
   roomPeers: string[];
+  peerMetas: Map<string, PeerMeta>;
   debugLog: string[];
   addLog: (msg: string) => void;
   reconnectAttempt: number;
@@ -55,19 +63,29 @@ export interface AudioProcessingState {
 // --- Chat ---
 
 export interface ChatMessage {
-  type: "text";
+  type: "text" | "image" | "voice";
   id: string;
   content: string;
   timestamp: number;
   /** "you" for local messages, peerId string for remote messages */
   from: string;
   reactions: Record<string, string[]>;
+  // Image-specific
+  imageUrl?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  // Voice-specific
+  voiceDataUrl?: string;   // base64 data URL of the audio
+  voiceBlobUrl?: string;   // object URL for playback
+  voiceDuration?: number;  // seconds
 }
 
 export type PresenceStatus = "online" | "idle" | "away";
 
 export type DataChannelMessage =
   | { type: "text"; id: string; content: string; timestamp: number }
+  | { type: "image"; id: string; data: string; mimeType: string; width: number; height: number; timestamp: number }
+  | { type: "voice"; id: string; data: string; duration: number; mimeType: string; timestamp: number }
   | { type: "reaction"; msgId: string; emoji: string }
   | { type: "read"; upTo: string }
   | { type: "typing"; isTyping: boolean }

@@ -4,6 +4,55 @@ import type { PeerInfo } from "../hooks/useWebRTC";
 import type { PeerAudioState } from "../hooks/useMultiChat";
 import AudioVisualizer from "./AudioVisualizer";
 
+/**
+ * Generate N evenly-spaced hue-shifted colors from the theme's --accent color.
+ * Returns hex strings. Local user gets index 0.
+ */
+function generateUserPalette(count: number): string[] {
+  const style = getComputedStyle(document.documentElement);
+  const accent = style.getPropertyValue("--accent").trim() || "#3b82f6";
+
+  // Parse hex to HSL
+  const r = parseInt(accent.slice(1, 3), 16) / 255;
+  const g = parseInt(accent.slice(3, 5), 16) / 255;
+  const b = parseInt(accent.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+
+  // Boost saturation slightly for better visual distinction
+  const baseSat = Math.max(s, 0.5);
+  const baseLit = Math.min(Math.max(l, 0.45), 0.65);
+
+  const colors: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const hue = (h + i / Math.max(count, 1)) % 1;
+    // HSL to hex
+    const c = (1 - Math.abs(2 * baseLit - 1)) * baseSat;
+    const x = c * (1 - Math.abs(((hue * 6) % 2) - 1));
+    const m = baseLit - c / 2;
+    let r1: number, g1: number, b1: number;
+    const seg = Math.floor(hue * 6);
+    if (seg === 0) { r1 = c; g1 = x; b1 = 0; }
+    else if (seg === 1) { r1 = x; g1 = c; b1 = 0; }
+    else if (seg === 2) { r1 = 0; g1 = c; b1 = x; }
+    else if (seg === 3) { r1 = 0; g1 = x; b1 = c; }
+    else if (seg === 4) { r1 = x; g1 = 0; b1 = c; }
+    else { r1 = c; g1 = 0; b1 = x; }
+    const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+    colors.push(`#${toHex(r1)}${toHex(g1)}${toHex(b1)}`);
+  }
+  return colors;
+}
+
+
 export interface VideoTileInfo {
   peerId: string;
   stream: MediaStream;
@@ -190,7 +239,15 @@ export default function VideoGrid({
     el: HTMLElement | null; // direct DOM ref for perf
     currentX: number;
     currentY: number;
+    containerW: number; // cached container dimensions (avoid getBoundingClientRect per frame)
+    containerH: number;
+    prevX: number; // previous frame position for velocity
+    prevY: number;
+    velX: number; // velocity in %/frame
+    velY: number;
   } | null>(null);
+  // Active spring animations for connector rubber-band effect (peerId → animId)
+  const springAnimsRef = useRef<Map<string, number>>(new Map());
   const wasDraggedRef = useRef(false);
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
@@ -202,6 +259,7 @@ export default function VideoGrid({
     origW: number; // original width in %
     el: HTMLElement | null;
     currentW: number;
+    containerW: number;
   } | null>(null);
   const customWidthsRef = useRef(customWidths);
   customWidthsRef.current = customWidths;
@@ -262,6 +320,17 @@ export default function VideoGrid({
     for (const t of activeScreenShares) keys.push(`screen-${t.peerId}`);
     return keys;
   }, [tiles, activeScreenShares, localScreenActive]);
+
+  // Stable per-user color palette: local=0, peers sorted by ID for consistency
+  const userColors = useMemo(() => {
+    const peerIds = tiles.map((t) => t.peerId).sort();
+    const userCount = 1 + peerIds.length; // local + peers
+    const palette = generateUserPalette(userCount);
+    const map = new Map<string, string>();
+    map.set("local", palette[0]);
+    peerIds.forEach((id, i) => map.set(id, palette[i + 1]));
+    return map;
+  }, [tiles]);
 
   // Per-tile dimensions based on tile type
   const getDim = useCallback((key: string): TileDim => {
@@ -388,9 +457,52 @@ export default function VideoGrid({
     });
   }, []);
 
+  /**
+   * Clip a line from rect-center A to rect-center B so it starts/ends at
+   * the rectangle borders rather than the centers.
+   * All values in % of container.
+   */
+  const clipLineToEdges = useCallback(
+    (
+      aPos: TilePosition, aDim: TileDim,
+      bPos: TilePosition, bDim: TileDim,
+    ): { x1: number; y1: number; x2: number; y2: number } | null => {
+      const aCx = aPos.x + aDim.w / 2;
+      const aH = tileHeightPct(aDim, containerAR);
+      const aCy = aPos.y + aH / 2;
+      const bCx = bPos.x + bDim.w / 2;
+      const bH = tileHeightPct(bDim, containerAR);
+      const bCy = bPos.y + bH / 2;
+
+      const dx = bCx - aCx;
+      const dy = bCy - aCy;
+      if (dx === 0 && dy === 0) return null;
+
+      // Find intersection of ray from center outward with rect edge
+      const edgeIntersect = (hw: number, hh: number, rdx: number, rdy: number) => {
+        // hw/hh = half-width/half-height of the rect in %
+        let t = Infinity;
+        if (rdx !== 0) t = Math.min(t, Math.abs(hw / rdx));
+        if (rdy !== 0) t = Math.min(t, Math.abs(hh / rdy));
+        return t;
+      };
+
+      const tA = edgeIntersect(aDim.w / 2, aH / 2, dx, dy);
+      const tB = edgeIntersect(bDim.w / 2, bH / 2, -dx, -dy);
+
+      return {
+        x1: aCx + dx * tA,
+        y1: aCy + dy * tA,
+        x2: bCx - dx * tB,
+        y2: bCy - dy * tB,
+      };
+    },
+    [containerAR],
+  );
+
   // Connector lines between peer camera tiles and their screen share tiles
   const connectorLines = useMemo(() => {
-    const lines: { fromCx: number; fromCy: number; toCx: number; toCy: number; peerId: string }[] = [];
+    const lines: { x1: number; y1: number; x2: number; y2: number; peerId: string; color: string }[] = [];
 
     // Local screen share connector
     if (localScreenActive) {
@@ -399,15 +511,8 @@ export default function VideoGrid({
       if (camPos && screenPos) {
         const camDim = tileDims.get("local") ?? DIM_CAMERA;
         const scrDim = tileDims.get("screen-local") ?? DIM_SCREEN;
-        const camH = tileHeightPct(camDim, containerAR);
-        const scrH = tileHeightPct(scrDim, containerAR);
-        lines.push({
-          fromCx: camPos.x + camDim.w / 2,
-          fromCy: camPos.y + camH / 2,
-          toCx: screenPos.x + scrDim.w / 2,
-          toCy: screenPos.y + scrH / 2,
-          peerId: "local",
-        });
+        const pts = clipLineToEdges(camPos, camDim, screenPos, scrDim);
+        if (pts) lines.push({ ...pts, peerId: "local", color: userColors.get("local") || "" });
       }
     }
 
@@ -418,19 +523,12 @@ export default function VideoGrid({
       if (camPos && screenPos) {
         const camDim = tileDims.get(ss.peerId) ?? DIM_CAMERA;
         const scrDim = tileDims.get(`screen-${ss.peerId}`) ?? DIM_SCREEN;
-        const camH = tileHeightPct(camDim, containerAR);
-        const scrH = tileHeightPct(scrDim, containerAR);
-        lines.push({
-          fromCx: camPos.x + camDim.w / 2,
-          fromCy: camPos.y + camH / 2,
-          toCx: screenPos.x + scrDim.w / 2,
-          toCy: screenPos.y + scrH / 2,
-          peerId: ss.peerId,
-        });
+        const pts = clipLineToEdges(camPos, camDim, screenPos, scrDim);
+        if (pts) lines.push({ ...pts, peerId: ss.peerId, color: userColors.get(ss.peerId) || "" });
       }
     }
     return lines;
-  }, [activeScreenShares, localScreenActive, positions, tileDims, containerAR]);
+  }, [activeScreenShares, localScreenActive, positions, tileDims, containerAR, clipLineToEdges, userColors]);
 
   // Reset expanded tile if the source disappears
   useEffect(() => {
@@ -457,6 +555,61 @@ export default function VideoGrid({
     setExpandedTile((prev) => (prev === tileKey ? null : tileKey));
   }, []);
 
+  // Helper: recompute and update a connector group's SVG paths during drag/resize.
+  // `movedKey` is the tile being dragged/resized, `overridePos` is its current position.
+  // If `overrideDim` is given (resize), use that for the moved tile's dimensions.
+  const updateConnectorLine = useCallback(
+    (movedKey: string, overridePos: TilePosition, overrideDim?: TileDim) => {
+      const svgContainer = canvasInnerRef.current?.querySelector(".canvas-connectors");
+      if (!svgContainer) return;
+      const group = svgContainer.querySelector(
+        `[data-peer="${movedKey}"], [data-screen="${movedKey}"]`,
+      ) as SVGGElement | null;
+      if (!group) return;
+
+      // Determine which is the camera key and which is the screen key
+      const isCam = group.dataset.peer === movedKey;
+      const camKey = isCam ? movedKey : group.dataset.peer!;
+      const scrKey = isCam ? group.dataset.screen! : movedKey;
+
+      const camPos = camKey === movedKey ? overridePos : positionsRef.current.get(camKey);
+      const scrPos = scrKey === movedKey ? overridePos : positionsRef.current.get(scrKey);
+      if (!camPos || !scrPos) return;
+
+      const camDim = (camKey === movedKey && overrideDim) ? overrideDim : (tileDims.get(camKey) ?? DIM_CAMERA);
+      const scrDim = (scrKey === movedKey && overrideDim) ? overrideDim : (tileDims.get(scrKey) ?? DIM_SCREEN);
+
+      // Edge-clipped line
+      const aCx = camPos.x + camDim.w / 2;
+      const aH = tileHeightPct(camDim, containerAR);
+      const aCy = camPos.y + aH / 2;
+      const bCx = scrPos.x + scrDim.w / 2;
+      const bH = tileHeightPct(scrDim, containerAR);
+      const bCy = scrPos.y + bH / 2;
+      const ddx = bCx - aCx, ddy = bCy - aCy;
+      if (ddx === 0 && ddy === 0) return;
+
+      const edgeT = (hw: number, hh: number, rdx: number, rdy: number) => {
+        let t = Infinity;
+        if (rdx !== 0) t = Math.min(t, Math.abs(hw / rdx));
+        if (rdy !== 0) t = Math.min(t, Math.abs(hh / rdy));
+        return t;
+      };
+      const tA = edgeT(camDim.w / 2, aH / 2, ddx, ddy);
+      const tB = edgeT(scrDim.w / 2, bH / 2, -ddx, -ddy);
+
+      const x1 = aCx + ddx * tA;
+      const y1 = aCy + ddy * tA;
+      const x2 = bCx - ddx * tB;
+      const y2 = bCy - ddy * tB;
+      const pathD = `M ${x1} ${y1} L ${x2} ${y2}`;
+
+      // Update path in the group
+      group.querySelectorAll("path").forEach((p) => p.setAttribute("d", pathD));
+    },
+    [tileDims, containerAR],
+  );
+
   // --- Drag handlers ---
   // Performance: during drag, we manipulate DOM directly (style.left/top)
   // and only commit to React state on pointerUp. This avoids re-rendering
@@ -470,6 +623,8 @@ export default function VideoGrid({
       const pos = positionsRef.current.get(key);
       if (!pos) return;
 
+      // Cache container dimensions once on pointerDown (avoids getBoundingClientRect per frame)
+      const rect = container.getBoundingClientRect();
       const tileEl = e.currentTarget as HTMLElement;
       tileEl.setPointerCapture(e.pointerId);
       wasDraggedRef.current = false;
@@ -482,6 +637,12 @@ export default function VideoGrid({
         el: tileEl,
         currentX: pos.x,
         currentY: pos.y,
+        containerW: rect.width,
+        containerH: rect.height,
+        prevX: pos.x,
+        prevY: pos.y,
+        velX: 0,
+        velY: 0,
       };
     },
     [],
@@ -491,8 +652,6 @@ export default function VideoGrid({
     (e: React.PointerEvent) => {
       const drag = draggingRef.current;
       if (!drag) return;
-      const container = containerRef.current;
-      if (!container) return;
 
       const dx = e.clientX - drag.startX;
       const dy = e.clientY - drag.startY;
@@ -510,51 +669,113 @@ export default function VideoGrid({
         setDraggingKey(drag.key);
       }
 
-      const rect = container.getBoundingClientRect();
-      const newX = drag.origX + (100 / rect.width) * dx;
-      const newY = drag.origY + (100 / rect.height) * dy;
+      const newX = drag.origX + (100 / drag.containerW) * dx;
+      const newY = drag.origY + (100 / drag.containerH) * dy;
 
+      // Track velocity for elastic snap
+      drag.velX = newX - drag.prevX;
+      drag.velY = newY - drag.prevY;
+      drag.prevX = newX;
+      drag.prevY = newY;
       drag.currentX = newX;
       drag.currentY = newY;
 
-      // Direct DOM update — no React re-render
+      // GPU-composited transform for drag — avoids layout reflow (critical for Tauri webview perf)
       if (drag.el) {
-        drag.el.style.left = `${newX}%`;
-        drag.el.style.top = `${newY}%`;
+        const txPx = (newX - drag.origX) * drag.containerW / 100;
+        const tyPx = (newY - drag.origY) * drag.containerH / 100;
+        drag.el.style.transform = `translate(${txPx}px, ${tyPx}px)`;
       }
 
-      // Update connector SVG lines directly if this tile is connected
-      const svgContainer = canvasInnerRef.current?.querySelector(".canvas-connectors");
-      if (svgContainer) {
-        const line = svgContainer.querySelector(`[data-peer="${drag.key}"], [data-screen="${drag.key}"]`) as SVGLineElement | null;
-        if (line) {
-          const dim = tileDims.get(drag.key);
-          if (dim) {
-            const h = tileHeightPct(dim, containerAR);
-            const cx = newX + dim.w / 2;
-            const cy = newY + h / 2;
-            if (line.dataset.peer === drag.key) {
-              line.setAttribute("x1", `${cx}%`);
-              line.setAttribute("y1", `${cy}%`);
-            } else {
-              line.setAttribute("x2", `${cx}%`);
-              line.setAttribute("y2", `${cy}%`);
-            }
-          }
-        }
-      }
+      // Update connector SVG lines directly — recompute edge-clipped endpoints
+      updateConnectorLine(drag.key, { x: newX, y: newY });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [tileDims, containerAR],
   );
+
+  const startSpringAnim = useCallback((tileKey: string, velX: number, velY: number) => {
+    const peerId = tileKey.startsWith("screen-") ? tileKey.replace("screen-", "") : tileKey;
+    const camKey = peerId;
+    const scrKey = `screen-${peerId}`;
+
+    // Cancel any existing spring for this peer
+    const prevAnim = springAnimsRef.current.get(peerId);
+    if (prevAnim) cancelAnimationFrame(prevAnim);
+
+    // Compute endpoints from authoritative position/dim state (not DOM)
+    const camPos = positionsRef.current.get(camKey);
+    const scrPos = positionsRef.current.get(scrKey);
+    if (!camPos || !scrPos) return;
+    const camDim = tileDims.get(camKey) ?? DIM_CAMERA;
+    const scrDim = tileDims.get(scrKey) ?? DIM_SCREEN;
+    const pts = clipLineToEdges(camPos, camDim, scrPos, scrDim);
+    if (!pts) return;
+    const { x1, y1, x2, y2 } = pts;
+
+    // Find the SVG path element to animate
+    const svgContainer = canvasInnerRef.current?.querySelector(".canvas-connectors");
+    if (!svgContainer) return;
+    const group = svgContainer.querySelector(`[data-peer="${peerId}"]`) as SVGGElement | null;
+    if (!group) return;
+    const pathEl = group.querySelector("path");
+    if (!pathEl) return;
+
+    // Compute the perpendicular offset amplitude from velocity
+    const speed = Math.sqrt(velX * velX + velY * velY);
+    const amplitude = Math.min(speed * 3, 12); // cap at 12 SVG units
+    if (amplitude < 0.5) return; // too small, skip
+
+    // Perpendicular direction (normalized in SVG units)
+    const ldx = x2 - x1, ldy = y2 - y1;
+    const len = Math.sqrt(ldx * ldx + ldy * ldy);
+    if (len < 0.1) return;
+    // Pick perpendicular side based on velocity cross product
+    const cross = velX * ldy - velY * ldx;
+    const sign = cross >= 0 ? 1 : -1;
+    const perpX = (-ldy / len) * sign;
+    const perpY = (ldx / len) * sign;
+
+    // Midpoint of the line (control point base)
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+
+    // Spring physics: damped oscillation
+    const decay = 6;     // damping
+    const freq = 18;     // oscillation frequency (rad/s)
+    const startTime = performance.now();
+    const duration = 600; // ms
+
+    const tick = () => {
+      const elapsed = (performance.now() - startTime) / 1000; // seconds
+      if (elapsed * 1000 > duration) {
+        // Settle to straight line
+        pathEl.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
+        springAnimsRef.current.delete(peerId);
+        return;
+      }
+      const offset = amplitude * Math.exp(-decay * elapsed) * Math.sin(freq * elapsed);
+      const cx = mx + perpX * offset;
+      const cy = my + perpY * offset;
+      pathEl.setAttribute("d", `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`);
+      springAnimsRef.current.set(peerId, requestAnimationFrame(tick));
+    };
+    springAnimsRef.current.set(peerId, requestAnimationFrame(tick));
+  }, [tileDims, clipLineToEdges]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     const drag = draggingRef.current;
     if (drag) {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-      // Commit final position to React state (single re-render)
+      if (drag.el) {
+        drag.el.style.transform = "";
+      }
       const finalX = drag.currentX;
       const finalY = drag.currentY;
       const key = drag.key;
+      const velX = drag.velX;
+      const velY = drag.velY;
+
       draggingRef.current = null;
       setDraggingKey(null);
       if (wasDraggedRef.current) {
@@ -563,10 +784,12 @@ export default function VideoGrid({
           next.set(key, { x: finalX, y: finalY });
           return next;
         });
+        // Launch spring animation after React re-render commits new positions
+        requestAnimationFrame(() => startSpringAnim(key, velX, velY));
         setTimeout(() => { wasDraggedRef.current = false; }, 0);
       }
     }
-  }, []);
+  }, [startSpringAnim]);
 
   // --- Resize handlers ---
   // Same direct-DOM-manipulation pattern as drag for performance.
@@ -578,6 +801,7 @@ export default function VideoGrid({
       const container = containerRef.current;
       if (!container) return;
 
+      const rect = container.getBoundingClientRect();
       const dim = customWidthsRef.current.get(key) ?? (tileDims.get(key)?.w ?? 16);
       const tileEl = (e.currentTarget as HTMLElement).parentElement;
       if (tileEl) tileEl.setPointerCapture(e.pointerId);
@@ -587,6 +811,7 @@ export default function VideoGrid({
         origW: dim,
         el: tileEl,
         currentW: dim,
+        containerW: rect.width,
       };
       wasDraggedRef.current = true; // suppress click actions
       setResizingKey(key);
@@ -598,20 +823,27 @@ export default function VideoGrid({
     (e: React.PointerEvent) => {
       const rz = resizingRef.current;
       if (!rz) return;
-      const container = containerRef.current;
-      if (!container) return;
 
-      const rect = container.getBoundingClientRect();
       const dx = e.clientX - rz.startX;
-      const newW = Math.max(5, Math.min(80, rz.origW + (100 / rect.width) * dx));
+      const newW = Math.max(5, Math.min(80, rz.origW + (100 / rz.containerW) * dx));
       rz.currentW = newW;
 
-      // Direct DOM update
+      // GPU-composited scale during resize — avoids layout reflow
       if (rz.el) {
-        rz.el.style.width = `${newW}%`;
+        const scale = newW / rz.origW;
+        rz.el.style.transform = `scale(${scale})`;
+        rz.el.style.transformOrigin = "top left";
       }
+
+      // Update connector line with the new effective dimensions
+      const baseDim = tileDims.get(rz.key);
+      if (baseDim) {
+        const pos = positionsRef.current.get(rz.key);
+        if (pos) updateConnectorLine(rz.key, pos, { w: newW, aspect: baseDim.aspect });
+      }
+
     },
-    [],
+    [tileDims, updateConnectorLine],
   );
 
   const handleResizePointerUp = useCallback((e: React.PointerEvent) => {
@@ -620,7 +852,10 @@ export default function VideoGrid({
       const el = rz.el;
       if (el) {
         try { el.releasePointerCapture(e.pointerId); } catch { /* ok */ }
+        el.style.transform = "";
+        el.style.transformOrigin = "";
       }
+
       const finalW = rz.currentW;
       const key = rz.key;
       resizingRef.current = null;
@@ -683,6 +918,7 @@ export default function VideoGrid({
             hasVideo={localHasVideo}
             displayName={localDisplayName}
             avatar={localProfilePic}
+            userColor={userColors.get("local")}
             expanded={true}
           />
         </div>
@@ -697,6 +933,7 @@ export default function VideoGrid({
             displayName={localDisplayName || "You"}
             screenStream={screenStream}
             streamRevision={streamRevision}
+            userColor={userColors.get("local")}
             expanded={true}
             watching={true}
             onToggleWatch={() => {}}
@@ -715,6 +952,7 @@ export default function VideoGrid({
               peerId={screenTile.peerId}
               screenStream={screenTile.screenStream}
               streamRevision={streamRevision}
+              userColor={userColors.get(screenTile.peerId)}
               expanded={true}
               watching={true}
               onToggleWatch={() => {}}
@@ -732,6 +970,7 @@ export default function VideoGrid({
             tile={remoteTile}
             displayName={peerNames?.get(remoteTile.peerId)}
             avatar={peerAvatars?.get(remoteTile.peerId)}
+            userColor={userColors.get(remoteTile.peerId)}
             streamRevision={streamRevision}
             audioState={peersAudioState?.get(remoteTile.peerId)}
             isMutedForPeer={mutedForPeers?.has(remoteTile.peerId) ?? false}
@@ -761,21 +1000,30 @@ export default function VideoGrid({
         ref={canvasInnerRef}
         style={{ transform: `translate(${canvasOffset.x}px, ${canvasOffset.y}px)` }}
       >
-        {/* SVG connector lines between peer camera and screen share tiles */}
+        {/* SVG connector lines */}
         {connectorLines.length > 0 && (
-          <svg className="canvas-connectors">
-            {connectorLines.map((line) => (
-              <line
-                key={`line-${line.peerId}`}
-                x1={`${line.fromCx}%`}
-                y1={`${line.fromCy}%`}
-                x2={`${line.toCx}%`}
-                y2={`${line.toCy}%`}
-                className="canvas-connector-line"
-                data-peer={line.peerId}
-                data-screen={`screen-${line.peerId}`}
-              />
-            ))}
+          <svg className="canvas-connectors" viewBox="0 0 100 100" preserveAspectRatio="none">
+            {connectorLines.map((line) => {
+              const pathD = `M ${line.x1} ${line.y1} L ${line.x2} ${line.y2}`;
+              const lineColor = line.color || "var(--text-dim, rgba(255,255,255,0.3))";
+              const isDrag = draggingKey != null && (draggingKey === line.peerId || draggingKey === `screen-${line.peerId}`) ||
+                resizingKey != null && (resizingKey === line.peerId || resizingKey === `screen-${line.peerId}`);
+              return (
+                <g
+                  key={`line-${line.peerId}`}
+                  className={`connector-group${isDrag ? " dragging" : ""}`}
+                  data-peer={line.peerId}
+                  data-screen={`screen-${line.peerId}`}
+                >
+                  <path
+                    d={pathD}
+                    className="connector-line"
+                    stroke={lineColor}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </g>
+              );
+            })}
           </svg>
         )}
 
@@ -807,6 +1055,7 @@ export default function VideoGrid({
                   hasVideo={localHasVideo}
                   displayName={localDisplayName}
                   avatar={localProfilePic}
+                  userColor={userColors.get("local")}
                 />
               ) : key === "screen-local" ? (
                 screenStream ? (
@@ -815,6 +1064,7 @@ export default function VideoGrid({
                     displayName={localDisplayName || "You"}
                     screenStream={screenStream}
                     streamRevision={streamRevision}
+                    userColor={userColors.get("local")}
                     expanded={false}
                     watching={watchingScreens.has("screen-local")}
                     onToggleWatch={() => toggleWatching("screen-local")}
@@ -830,6 +1080,7 @@ export default function VideoGrid({
                       displayName={peerNames?.get(t.peerId)}
                       screenStream={t.screenStream}
                       streamRevision={streamRevision}
+                      userColor={userColors.get(t.peerId)}
                       expanded={false}
                       watching={watchingScreens.has(key)}
                       onToggleWatch={() => toggleWatching(key)}
@@ -844,6 +1095,7 @@ export default function VideoGrid({
                       tile={t}
                       displayName={peerNames?.get(t.peerId)}
                       avatar={peerAvatars?.get(t.peerId)}
+                      userColor={userColors.get(t.peerId)}
                       streamRevision={streamRevision}
                       audioState={peersAudioState?.get(t.peerId)}
                       isMutedForPeer={mutedForPeers?.has(t.peerId) ?? false}
@@ -876,6 +1128,7 @@ function LocalTile({
   hasVideo,
   displayName,
   avatar,
+  userColor,
   expanded = false,
 }: {
   stream: MediaStream | null;
@@ -883,6 +1136,7 @@ function LocalTile({
   hasVideo: boolean;
   displayName?: string;
   avatar?: string;
+  userColor?: string;
   expanded?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -896,7 +1150,10 @@ function LocalTile({
   }, [stream]);
 
   return (
-    <div className={`video-tile ${speaking ? "speaking" : ""} ${expanded ? "expanded" : ""}`}>
+    <div
+      className={`video-tile ${speaking ? "speaking" : ""} ${expanded ? "expanded" : ""}`}
+      style={userColor ? { "--user-color": userColor } as React.CSSProperties : undefined}
+    >
       {hasVideo ? (
         <video
           ref={videoRef}
@@ -907,7 +1164,7 @@ function LocalTile({
         />
       ) : stream ? (
         <div className="tile-audio-only">
-          <AudioVisualizer stream={stream} />
+          <AudioVisualizer stream={stream} userColor={userColor} />
         </div>
       ) : (
         <div className="tile-placeholder">YOU</div>
@@ -933,6 +1190,7 @@ function RemoteTile({
   tile,
   displayName,
   avatar,
+  userColor,
   streamRevision,
   audioState,
   isMutedForPeer,
@@ -945,6 +1203,7 @@ function RemoteTile({
   tile: VideoTileInfo;
   displayName?: string;
   avatar?: string;
+  userColor?: string;
   streamRevision: number;
   audioState?: PeerAudioState;
   isMutedForPeer: boolean;
@@ -1006,6 +1265,7 @@ function RemoteTile({
   return (
     <div
       className={`video-tile ${tile.speaking ? "speaking" : ""} ${disconnected ? "disconnected" : ""} ${expanded ? "expanded" : ""}`}
+      style={userColor ? { "--user-color": userColor } as React.CSSProperties : undefined}
       onContextMenu={handleContextMenu}
     >
       {hasVideo ? (
@@ -1018,7 +1278,7 @@ function RemoteTile({
         />
       ) : hasAudio ? (
         <div className="tile-audio-only">
-          <AudioVisualizer stream={tile.stream} />
+          <AudioVisualizer stream={tile.stream} userColor={userColor} />
           {tile.speaking && (
             <span className="tile-speaking-badge">Speaking</span>
           )}
@@ -1127,6 +1387,7 @@ function ScreenShareTile({
   displayName,
   screenStream,
   streamRevision,
+  userColor,
   expanded,
   watching,
   onToggleWatch,
@@ -1135,6 +1396,7 @@ function ScreenShareTile({
   displayName?: string;
   screenStream: MediaStream;
   streamRevision: number;
+  userColor?: string;
   expanded: boolean;
   watching: boolean;
   onToggleWatch: () => void;
@@ -1184,6 +1446,7 @@ function ScreenShareTile({
   return (
     <div
       className={`video-tile screen-share-tile ${expanded ? "expanded" : ""} ${!watching ? "not-watching" : ""}`}
+      style={userColor ? { "--user-color": userColor } as React.CSSProperties : undefined}
       role="button"
       tabIndex={0}
       aria-label={

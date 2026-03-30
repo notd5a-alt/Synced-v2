@@ -1,9 +1,10 @@
-import { useState, useRef, useCallback, type FormEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type FormEvent } from "react";
 import ThemeSelector from "./ThemeSelector";
 import {
   getServerMode,
   setServerMode,
   getRemoteUrl,
+  getApiBaseUrl,
   DEFAULT_REMOTE_URL,
   type ServerMode,
 } from "../config";
@@ -56,7 +57,46 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
   const [joinCode, setJoinCode] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [serverMode, setServerModeState] = useState<ServerMode>(getServerMode);
+  const [roomPreview, setRoomPreview] = useState<{
+    peerCount: number;
+    maxPeers: number;
+    participants: { peerId: string; name: string }[];
+  } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-fetch room info when a valid 6-char code is entered
+  const ROOM_CODE_RE = /^[A-HJKL-NP-Z2-9]{6}$/;
+  useEffect(() => {
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    const upper = joinCode.toUpperCase().trim();
+    if (!ROOM_CODE_RE.test(upper)) {
+      setRoomPreview(null);
+      return;
+    }
+    setPreviewLoading(true);
+    previewTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/api/rooms/${upper}`);
+        const data = await res.json();
+        if (data.exists) {
+          setRoomPreview({
+            peerCount: data.peer_count || 0,
+            maxPeers: data.max_peers || 8,
+            participants: data.participants || [],
+          });
+        } else {
+          setRoomPreview(null);
+        }
+      } catch {
+        setRoomPreview(null);
+      }
+      setPreviewLoading(false);
+    }, 300); // debounce
+    return () => { if (previewTimerRef.current) clearTimeout(previewTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinCode]);
 
   const handleAvatarPick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -151,6 +191,29 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
             [ JOIN ]
           </button>
         </form>
+
+        {/* Room preview — shows who's in the room before joining */}
+        {previewLoading && joinCode.length === 6 && (
+          <div className="room-preview">
+            <span className="room-preview-loading">Checking room...</span>
+          </div>
+        )}
+        {roomPreview && !previewLoading && (
+          <div className="room-preview">
+            <div className="room-preview-header">
+              {roomPreview.peerCount} / {roomPreview.maxPeers} peers in room
+            </div>
+            {roomPreview.participants.length > 0 && (
+              <div className="room-preview-list">
+                {roomPreview.participants.map((p) => (
+                  <div key={p.peerId} className="room-preview-peer">
+                    {p.name || p.peerId.slice(0, 8)}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {roomError && (
           <p className="room-error">{roomError}</p>

@@ -51,7 +51,7 @@ export default function App() {
   const webrtc = useWebRTC(signaling);
   const theme = useTheme();
   const monitor = useConnectionMonitor(webrtc.peers, signaling.state);
-  const chat = useMultiChat(webrtc.peers);
+  const chat = useMultiChat(webrtc.peers, displayName, profilePic);
   const files = useMultiFileTransfer(webrtc.peers);
   const vad = useMultiVAD(webrtc.localStream, webrtc.peers);
   const remoteAudioRef = useRef<HTMLVideoElement | null>(null);
@@ -141,21 +141,14 @@ export default function App() {
     }
   }, [webrtc.peerCount, webrtc.connectionState, screen, fullReset]);
 
-  // Send display name and profile pic to all peers when peer count changes (new peer joined)
-  const displayNameRef = useRef(displayName);
-  displayNameRef.current = displayName;
-  const profilePicRef = useRef(profilePic);
-  profilePicRef.current = profilePic;
+  // Note: display name and profile pic are sent automatically by useMultiChat
+  // when channels open and when values change mid-session.
+  // Also update signaling-level metadata so the lobby/API shows current names.
   useEffect(() => {
-    if (webrtc.peerCount > 0) {
-      // Small delay to ensure data channels are open
-      const t = setTimeout(() => {
-        if (displayNameRef.current) chat.sendDisplayName(displayNameRef.current);
-        if (profilePicRef.current) chat.sendProfilePic(profilePicRef.current);
-      }, 500);
-      return () => clearTimeout(t);
+    if (signaling.state === "open" && (displayName || profilePic)) {
+      signaling.send({ type: "set-meta", name: displayName, avatar: profilePic } as any);
     }
-  }, [webrtc.peerCount, chat.sendDisplayName, chat.sendProfilePic]);
+  }, [displayName, profilePic, signaling.state, signaling.send]);
 
   const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
 
@@ -271,6 +264,15 @@ export default function App() {
   // reconnect after disconnect). handleRetry() calls init() directly for retries.
   useEffect(() => {
     if (signaling.state === "open") {
+      // Send display name and profile pic as metadata to signaling server
+      // so other peers (and the room info API) can see who's in the room
+      const meta: Record<string, string> = { type: "set-meta" };
+      if (displayName) meta.name = displayName;
+      if (profilePic) meta.avatar = profilePic;
+      if (displayName || profilePic) {
+        signaling.send(meta as any);
+      }
+
       let cancelled = false;
       signaling.addLog("effect: init");
       fetch(`${getApiBaseUrl()}/api/ice-config`)
@@ -512,8 +514,10 @@ export default function App() {
         maxReconnectAttempts={signaling.maxReconnectAttempts}
         peerCount={webrtc.peerCount}
         roomPeers={signaling.roomPeers}
+        peerMetas={signaling.peerMetas}
         localPeerId={signaling.peerId}
         displayName={displayName}
+        localProfilePic={profilePic}
         onRetry={handleRetry}
         onCancel={handleDisconnect}
       /></div>
@@ -662,6 +666,9 @@ export default function App() {
             peerNames={chat.peerNames}
             peerAvatars={chat.peerAvatars}
             localProfilePic={profilePic}
+            onSendImage={chat.sendImage}
+            onSendVoice={chat.sendVoice}
+            localStream={webrtc.localStream}
           />
           </div>
         )}

@@ -170,8 +170,29 @@ export default function VideoCall({
           </>
         ) : (
           <>
-            {hasRemoteTracks ? (
-              <p className="video-placeholder">Peer is in a call. Click JOIN to connect.</p>
+            {peerNames.size > 0 ? (
+              <div className="precall-panel">
+                <div className="precall-peers">
+                  {Array.from(peerNames.entries()).map(([peerId, name]) => (
+                    <div key={peerId} className="precall-peer">
+                      {peerAvatars?.get(peerId) ? (
+                        <img src={peerAvatars.get(peerId)} alt="" className="precall-avatar" />
+                      ) : (
+                        <span className="precall-avatar-placeholder">
+                          {(name || peerId.slice(0, 2)).charAt(0).toUpperCase()}
+                        </span>
+                      )}
+                      <span className="precall-name">{name || peerId.slice(0, 8)}</span>
+                      {hasRemoteTracks && <span className="precall-in-call">IN CALL</span>}
+                    </div>
+                  ))}
+                </div>
+                <p className="precall-hint">
+                  {hasRemoteTracks
+                    ? `${peerNames.size} peer${peerNames.size > 1 ? "s" : ""} in call — click JOIN to connect`
+                    : `${peerNames.size} peer${peerNames.size > 1 ? "s" : ""} connected`}
+                </p>
+              </div>
             ) : (
               <GhostAsciiArt />
             )}
