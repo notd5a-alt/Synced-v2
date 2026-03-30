@@ -150,3 +150,11 @@ jobs:
         with:
           name: synced-windows-exe
           path: src-tauri/target/release/Synced.exe
+
+      - name: Upload NSIS updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: synced-windows-updater
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.nsis.zip
+            src-tauri/target/release/bundle/nsis/*-setup.nsis.zip.sig
