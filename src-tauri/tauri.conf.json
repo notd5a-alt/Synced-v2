@@ -6,10 +6,10 @@
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
     "devUrl": "http://localhost:9876",
-    "frontendDist": "../backend/static",
-    "withGlobalTauri": true
+    "frontendDist": "../backend/static"
   },
   "app": {
+    "withGlobalTauri": true,
     "security": {
       "csp": "default-src 'self'; connect-src 'self' blob: ws://localhost:* wss://localhost:* http://localhost:* ws://* wss://* http://* https://*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' blob: data:; media-src 'self' blob:; script-src 'self'"
     },
