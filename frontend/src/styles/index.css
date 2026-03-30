@@ -690,6 +690,11 @@ input[type="text"]:focus:placeholder-shown {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  position: relative;
+  background-color: var(--surface, #131313);
+  background-image: var(--canvas-bg-image, radial-gradient(circle, rgba(255, 255, 255, 0.08) 1px, transparent 1px));
+  background-size: var(--canvas-bg-size, 24px 24px);
+  background-position: var(--canvas-bg-position, 0 0);
 }
 .chat-messages .empty {
   color: var(--text-dim);
@@ -1064,7 +1069,8 @@ input[type="text"]:focus:placeholder-shown {
 }
 
 /* Rain — animated falling streaks with dot-grid overlay (activated via html.canvas-bg-rain) */
-.canvas-bg-rain .video-canvas {
+.canvas-bg-rain .video-canvas,
+.canvas-bg-rain .chat-messages {
   --rain-c: var(--canvas-dot, rgba(255,255,255,0.08));
   background-image:
     radial-gradient(4px 100px at 0px 235px, var(--rain-c), #0000),
@@ -1122,7 +1128,7 @@ input[type="text"]:focus:placeholder-shown {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: -1;
   pointer-events: none;
   backdrop-filter: blur(1em) brightness(6);
   background-image: radial-gradient(circle at 50% 50%, #0000 0, #0000 2px, hsl(0 0 4%) 2px);
