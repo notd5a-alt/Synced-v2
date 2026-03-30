@@ -34,6 +34,7 @@ interface PeerState {
   lastNegotiatedFingerprint: string;
   lastNegotiationTime: number;
   pendingScreenTrack: boolean;
+  pendingScreenAudio: boolean;
   screenVideoSender: RTCRtpSender | null;
   screenAudioSender: RTCRtpSender | null;
   cameraVideoSender: RTCRtpSender | null;
@@ -274,6 +275,7 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
       lastNegotiatedFingerprint: "",
       lastNegotiationTime: 0,
       pendingScreenTrack: false,
+      pendingScreenAudio: false,
       screenVideoSender: null,
       screenAudioSender: null,
       cameraVideoSender: null,
@@ -343,7 +345,10 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
     pc.ontrack = (e) => {
       const isScreen = e.track.kind === "video" && ps.pendingScreenTrack;
       if (isScreen) ps.pendingScreenTrack = false;
-      const target = isScreen ? ps.remoteScreenStream : ps.remoteStream;
+      // Audio tracks arriving while pendingScreenAudio is set belong to screen share
+      const isScreenAudio = e.track.kind === "audio" && ps.pendingScreenAudio;
+      if (isScreenAudio) ps.pendingScreenAudio = false;
+      const target = (isScreen || isScreenAudio) ? ps.remoteScreenStream : ps.remoteStream;
 
       if (!target.getTracks().includes(e.track)) {
         target.addTrack(e.track);
@@ -549,8 +554,10 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
       } else if (msg.type === "screen-sharing") {
         if (msg.active) {
           ps.pendingScreenTrack = true;
+          ps.pendingScreenAudio = true;
         } else {
           ps.pendingScreenTrack = false;
+          ps.pendingScreenAudio = false;
           const sStream = ps.remoteScreenStream;
           sStream.getTracks().forEach((t) => sStream.removeTrack(t));
           bumpRevision();

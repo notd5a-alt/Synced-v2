@@ -910,7 +910,6 @@ function ScreenShareTile({
             ref={videoRef}
             autoPlay
             playsInline
-            muted
             className="tile-video"
           />
           <span className="tile-label">{label} — Screen</span>

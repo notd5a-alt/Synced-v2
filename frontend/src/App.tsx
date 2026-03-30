@@ -67,6 +67,7 @@ export default function App() {
     },
     disconnectSignaling: signaling.disconnect,
     clearChatMessages: chat.clearMessages,
+    clearFiles: files.clearFiles,
   });
   resetCleanups.current = {
     cleanupNoiseSuppression: noiseSuppression.teardown,
@@ -78,6 +79,7 @@ export default function App() {
     },
     disconnectSignaling: signaling.disconnect,
     clearChatMessages: chat.clearMessages,
+    clearFiles: files.clearFiles,
   };
 
   // Full state reset — shared by handleDisconnect and peer-disconnect effect.
@@ -718,7 +720,16 @@ export default function App() {
             onToggleDeafen={() => {
               const newDeafened = !app.deafened;
               app.setDeafened(newDeafened);
+              // Deafen also mutes the local microphone
               const track = webrtc.localStreamRef.current?.getAudioTracks()[0];
+              if (track) {
+                if (newDeafened) {
+                  track.enabled = false;
+                } else {
+                  // Un-deafen restores mic (unless it was manually muted before)
+                  track.enabled = true;
+                }
+              }
               const muted = track ? !track.enabled : true;
               chat.sendAudioState(muted, newDeafened);
             }}

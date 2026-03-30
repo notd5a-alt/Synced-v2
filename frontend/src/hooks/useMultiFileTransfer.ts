@@ -77,6 +77,7 @@ export interface MultiFileTransferHook {
   incoming: IncomingFile[];
   outgoing: OutgoingFile | null;
   sentFiles: SentFile[];
+  clearFiles: () => void;
   sendFile: (file: File) => Promise<void>;
   cancelTransfer: (id: string) => void;
 }
@@ -468,5 +469,19 @@ export default function useMultiFileTransfer(
     }
   }, []);
 
-  return { incoming, outgoing, sentFiles, sendFile, cancelTransfer };
+  const clearFiles = useCallback(() => {
+    // Revoke all blob URLs
+    blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    blobUrlsRef.current = new Map();
+    // Reset all state
+    setIncoming([]);
+    setOutgoing(null);
+    setSentFiles([]);
+    pendingRef.current = {};
+    activeReceiveIdsRef.current = new Map();
+    sendLockRef.current = false;
+    attachedChannelsRef.current = new Set();
+  }, []);
+
+  return { incoming, outgoing, sentFiles, sendFile, cancelTransfer, clearFiles };
 }

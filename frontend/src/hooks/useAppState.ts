@@ -58,6 +58,7 @@ export interface FullResetCleanups {
   clearPersistentAudio: () => void;
   disconnectSignaling: () => void;
   clearChatMessages: () => void;
+  clearFiles: () => void;
 }
 
 export default function useAppState(): UseAppStateReturn {
@@ -121,6 +122,7 @@ export default function useAppState(): UseAppStateReturn {
     setRoomError(null);
     setFingerprint(null);
     cleanups.clearChatMessages();
+    cleanups.clearFiles();
     setActiveTab("chat");
     setLastSeenSeq(0);
     setUnreadDismissed(false);

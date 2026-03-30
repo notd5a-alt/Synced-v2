@@ -152,6 +152,11 @@ interface AudioVisualizerProps {
 
 export default function AudioVisualizer({ stream, userColor }: AudioVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef(stream);
+  streamRef.current = stream;
+  // Stabilize on audio track ID so new MediaStream objects with the same audio
+  // track don't cause a full teardown/reinit of the Three.js scene
+  const audioTrackId = stream?.getAudioTracks()[0]?.id ?? "";
   const stateRef = useRef<{
     renderer: THREE.WebGLRenderer;
     scene: THREE.Scene;
@@ -167,7 +172,8 @@ export default function AudioVisualizer({ stream, userColor }: AudioVisualizerPr
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || !stream || stream.getAudioTracks().length === 0) return;
+    const currentStream = streamRef.current;
+    if (!el || !currentStream || currentStream.getAudioTracks().length === 0) return;
 
     // --- Renderer ---
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -213,7 +219,7 @@ export default function AudioVisualizer({ stream, userColor }: AudioVisualizerPr
     });
 
     // --- Audio ---
-    const analyzer = new StreamAudioAnalyzer(stream);
+    const analyzer = new StreamAudioAnalyzer(currentStream);
 
     const state = {
       renderer,
@@ -335,7 +341,7 @@ export default function AudioVisualizer({ stream, userColor }: AudioVisualizerPr
       stateRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, userColor]);
+  }, [audioTrackId, userColor]);
 
   // Update theme colors reactively (when theme changes without remount)
   useEffect(() => {

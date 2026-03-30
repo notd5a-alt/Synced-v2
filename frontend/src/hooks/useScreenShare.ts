@@ -9,6 +9,7 @@ export interface ScreenSharePeerSlice {
   remotePeerId: string;
   pc: RTCPeerConnection;
   pendingScreenTrack: boolean;
+  pendingScreenAudio: boolean;
   screenVideoSender: RTCRtpSender | null;
   screenAudioSender: RTCRtpSender | null;
   remoteScreenStream: MediaStream;
