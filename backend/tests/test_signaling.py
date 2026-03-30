@@ -85,13 +85,13 @@ class TestTokenBucket:
 
     def test_refills_over_time(self):
         import time
-        bucket = _TokenBucket(rate=1000, burst=5)
+        bucket = _TokenBucket(rate=100, burst=5)
         # Drain the bucket
         for _ in range(5):
             bucket.consume()
         assert bucket.consume() is False
-        # Wait for refill
-        time.sleep(0.01)  # 10ms at 1000/s = ~10 tokens
+        # Wait for refill — generous sleep for Windows timer resolution (~15ms)
+        time.sleep(0.1)  # 100ms at 100/s = ~10 tokens
         assert bucket.consume() is True
 
     def test_rejects_when_empty(self):
