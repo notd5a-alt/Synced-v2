@@ -932,6 +932,9 @@ input[type="text"]:focus:placeholder-shown {
 .voice-visualizer {
   width: 100%;
   height: 60px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 4px;
 }
 .voice-meta {
   display: flex;

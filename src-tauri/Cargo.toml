@@ -1,6 +1,6 @@
 [package]
 name = "synced"
-version = "1.0.0"
+version = "1.0.1"
 description = "Zero-trust peer-to-peer voice, video, and text chat"
 edition = "2021"
 

@@ -32,8 +32,9 @@ echo ""
 declare -A PLATFORMS
 declare -A SIGNATURES
 
-# Linux — AppImage
+# Linux — AppImage (tar.gz or plain)
 LINUX_ARTIFACT=$(find "${ARTIFACTS_DIR}" -name "*.AppImage.tar.gz" 2>/dev/null | head -1)
+[ -z "${LINUX_ARTIFACT}" ] && LINUX_ARTIFACT=$(find "${ARTIFACTS_DIR}" -name "*.AppImage" 2>/dev/null | head -1)
 if [ -n "${LINUX_ARTIFACT}" ] && [ -f "${LINUX_ARTIFACT}.sig" ]; then
     PLATFORMS["linux-x86_64"]="${LINUX_ARTIFACT}"
     SIGNATURES["linux-x86_64"]=$(cat "${LINUX_ARTIFACT}.sig")
