@@ -579,35 +579,14 @@ export default function VideoGrid({
       const camDim = (camKey === movedKey && overrideDim) ? overrideDim : (tileDims.get(camKey) ?? DIM_CAMERA);
       const scrDim = (scrKey === movedKey && overrideDim) ? overrideDim : (tileDims.get(scrKey) ?? DIM_SCREEN);
 
-      // Edge-clipped line
-      const aCx = camPos.x + camDim.w / 2;
-      const aH = tileHeightPct(camDim, containerAR);
-      const aCy = camPos.y + aH / 2;
-      const bCx = scrPos.x + scrDim.w / 2;
-      const bH = tileHeightPct(scrDim, containerAR);
-      const bCy = scrPos.y + bH / 2;
-      const ddx = bCx - aCx, ddy = bCy - aCy;
-      if (ddx === 0 && ddy === 0) return;
-
-      const edgeT = (hw: number, hh: number, rdx: number, rdy: number) => {
-        let t = Infinity;
-        if (rdx !== 0) t = Math.min(t, Math.abs(hw / rdx));
-        if (rdy !== 0) t = Math.min(t, Math.abs(hh / rdy));
-        return t;
-      };
-      const tA = edgeT(camDim.w / 2, aH / 2, ddx, ddy);
-      const tB = edgeT(scrDim.w / 2, bH / 2, -ddx, -ddy);
-
-      const x1 = aCx + ddx * tA;
-      const y1 = aCy + ddy * tA;
-      const x2 = bCx - ddx * tB;
-      const y2 = bCy - ddy * tB;
-      const pathD = `M ${x1} ${y1} L ${x2} ${y2}`;
+      const pts = clipLineToEdges(camPos, camDim, scrPos, scrDim);
+      if (!pts) return;
+      const pathD = `M ${pts.x1} ${pts.y1} L ${pts.x2} ${pts.y2}`;
 
       // Update path in the group
       group.querySelectorAll("path").forEach((p) => p.setAttribute("d", pathD));
     },
-    [tileDims, containerAR],
+    [tileDims, clipLineToEdges],
   );
 
   // --- Drag handlers ---

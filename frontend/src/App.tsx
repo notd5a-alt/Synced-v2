@@ -143,10 +143,10 @@ export default function App() {
 
   // Note: display name and profile pic are sent automatically by useMultiChat
   // when channels open and when values change mid-session.
-  // Also update signaling-level metadata so the lobby/API shows current names.
+  // Signaling-level metadata (for lobby/API) is sent on connect and on change.
   useEffect(() => {
     if (signaling.state === "open" && (displayName || profilePic)) {
-      signaling.send({ type: "set-meta", name: displayName, avatar: profilePic } as any);
+      signaling.send({ type: "set-meta", name: displayName, avatar: profilePic });
     }
   }, [displayName, profilePic, signaling.state, signaling.send]);
 
@@ -264,14 +264,8 @@ export default function App() {
   // reconnect after disconnect). handleRetry() calls init() directly for retries.
   useEffect(() => {
     if (signaling.state === "open") {
-      // Send display name and profile pic as metadata to signaling server
-      // so other peers (and the room info API) can see who's in the room
-      const meta: Record<string, string> = { type: "set-meta" };
-      if (displayName) meta.name = displayName;
-      if (profilePic) meta.avatar = profilePic;
-      if (displayName || profilePic) {
-        signaling.send(meta as any);
-      }
+      // Note: signaling-level metadata (set-meta) is sent by the effect
+      // that watches displayName/profilePic changes — no need to duplicate here.
 
       let cancelled = false;
       signaling.addLog("effect: init");

@@ -27,6 +27,7 @@ interface HomeProps {
   onProfilePicChange: (dataUrl: string) => void;
 }
 
+const ROOM_CODE_RE = /^[A-HJKL-NP-Z2-9]{6}$/;
 const MAX_AVATAR_SIZE = 128;
 const AVATAR_QUALITY = 0.7;
 
@@ -67,7 +68,6 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-fetch room info when a valid 6-char code is entered
-  const ROOM_CODE_RE = /^[A-HJKL-NP-Z2-9]{6}$/;
   useEffect(() => {
     if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
     const upper = joinCode.toUpperCase().trim();

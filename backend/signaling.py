@@ -289,11 +289,10 @@ class SignalingRoom:
                         avatar = msg.get("avatar", "")
                         if isinstance(avatar, str) and len(avatar) <= 70000:
                             meta["avatar"] = avatar
-                        async with self._lock:
-                            self._peer_meta[peer_id] = meta
-                        # Broadcast updated meta to all other peers
+                        # Store meta and collect broadcast targets in a single lock
                         broadcast_msg = json.dumps({"type": "peer-meta", "peerId": peer_id, "meta": meta})
                         async with self._lock:
+                            self._peer_meta[peer_id] = meta
                             targets = [(pid, pws) for pid, pws in self._peers.items() if pid != peer_id]
                         for tid, tws in targets:
                             try:

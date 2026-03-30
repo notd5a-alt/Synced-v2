@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from "react";
 import type { ChatMessage } from "../types";
 import VoiceMessage from "./VoiceMessage";
+import { formatDuration } from "../utils/formatTime";
 
 const REACTION_EMOJIS = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}", "\u{1F62E}", "\u{1F622}", "\u{1F525}"];
 
@@ -191,11 +192,6 @@ export default function Chat({
     };
   }, []);
 
-  const formatRecTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  };
 
   // Find the index of the last "you" message that the peer has read
   const lastReadIdx = peerReadUpTo
@@ -257,7 +253,7 @@ export default function Chat({
               <VoiceMessage
                 blobUrl={m.voiceBlobUrl}
                 duration={m.voiceDuration || 0}
-                userColor={m.from === "you" ? undefined : undefined}
+                userColor={undefined}
               />
             )}
 
@@ -331,7 +327,7 @@ export default function Chat({
       {recording ? (
         <div className="chat-input recording-bar">
           <span className="rec-indicator">REC</span>
-          <span className="rec-time">{formatRecTime(recordingTime)}</span>
+          <span className="rec-time">{formatDuration(recordingTime)}</span>
           <button className="btn" type="button" onClick={cancelRecording}>
             [ CANCEL ]
           </button>

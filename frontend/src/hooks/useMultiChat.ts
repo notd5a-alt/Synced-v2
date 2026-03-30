@@ -187,7 +187,6 @@ export default function useMultiChat(
                 timestamp: parsed.timestamp,
                 from: peerId,
                 reactions: {},
-                voiceDataUrl: parsed.data,
                 voiceBlobUrl,
                 voiceDuration: parsed.duration,
               },
@@ -509,7 +508,6 @@ export default function useMultiChat(
         timestamp,
         from: "you",
         reactions: {},
-        voiceDataUrl: dataUrl,
         voiceBlobUrl: blobUrl,
         voiceDuration: duration,
       },
@@ -544,7 +542,14 @@ export default function useMultiChat(
   }, [localDisplayName, localProfilePic, sendDisplayName, sendProfilePic]);
 
   const clearMessages = useCallback(() => {
-    setMessages([]);
+    // Revoke blob URLs to prevent memory leaks
+    setMessages((prev) => {
+      for (const m of prev) {
+        if (m.imageUrl && m.imageUrl.startsWith("blob:")) URL.revokeObjectURL(m.imageUrl);
+        if (m.voiceBlobUrl && m.voiceBlobUrl.startsWith("blob:")) URL.revokeObjectURL(m.voiceBlobUrl);
+      }
+      return [];
+    });
     setPeerMsgSeq(0);
     setPeerReadUpTo(null);
     setPeersTyping(new Map());

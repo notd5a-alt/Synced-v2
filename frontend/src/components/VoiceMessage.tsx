@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import AudioVisualizer from "./AudioVisualizer";
+import { formatDuration } from "../utils/formatTime";
 
 interface VoiceMessageProps {
   blobUrl: string;
@@ -95,12 +96,6 @@ export default function VoiceMessage({ blobUrl, duration, userColor }: VoiceMess
     animRef.current = requestAnimationFrame(tick);
   }, [playing, blobUrl, stop]);
 
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  };
-
   return (
     <div className="voice-message">
       <button className="btn voice-play-btn" onClick={play} type="button">
@@ -114,7 +109,7 @@ export default function VoiceMessage({ blobUrl, duration, userColor }: VoiceMess
           <div className="voice-progress-bar">
             <div className="voice-progress-fill" style={{ width: `${progress * 100}%` }} />
           </div>
-          <span className="voice-duration">{formatTime(duration)}</span>
+          <span className="voice-duration">{formatDuration(duration)}</span>
         </div>
       </div>
     </div>

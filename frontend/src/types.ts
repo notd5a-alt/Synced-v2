@@ -75,7 +75,6 @@ export interface ChatMessage {
   imageWidth?: number;
   imageHeight?: number;
   // Voice-specific
-  voiceDataUrl?: string;   // base64 data URL of the audio
   voiceBlobUrl?: string;   // object URL for playback
   voiceDuration?: number;  // seconds
 }
