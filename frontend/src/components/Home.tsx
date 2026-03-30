@@ -61,7 +61,6 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
   const [roomPreview, setRoomPreview] = useState<{
     peerCount: number;
     maxPeers: number;
-    participants: { peerId: string; name: string }[];
   } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -84,7 +83,6 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
           setRoomPreview({
             peerCount: data.peer_count || 0,
             maxPeers: data.max_peers || 8,
-            participants: data.participants || [],
           });
         } else {
           setRoomPreview(null);
@@ -203,15 +201,6 @@ export default function Home({ onCreateRoom, onJoinRoom, roomError, themeId, onT
             <div className="room-preview-header">
               {roomPreview.peerCount} / {roomPreview.maxPeers} peers in room
             </div>
-            {roomPreview.participants.length > 0 && (
-              <div className="room-preview-list">
-                {roomPreview.participants.map((p) => (
-                  <div key={p.peerId} className="room-preview-peer">
-                    {p.name || p.peerId.slice(0, 8)}
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
 

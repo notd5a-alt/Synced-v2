@@ -558,6 +558,7 @@ export default function useWebRTC(signaling: SignalingHook): WebRTCHook {
       }
     } catch (err) {
       console.error("signaling handler error:", err);
+      setCallError("Connection negotiation failed — please retry or reload.");
     }
   }, [destroyPeerConnection, log, bumpRevision]);
 

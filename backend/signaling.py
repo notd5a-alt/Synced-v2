@@ -13,13 +13,27 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger("synced.signaling")
 
+
+def _env_int(key: str, default: int) -> int:
+    """Read an integer from an environment variable with safe fallback."""
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger.warning("Invalid value for %s=%r, using default %d", key, raw, default)
+        return default
+
+
 MAX_MESSAGE_SIZE = 65536  # 64 KB
-MAX_ROOMS = int(os.environ.get("SYNCED_MAX_ROOMS", 100))           # Cap total rooms
-MAX_PEERS_PER_ROOM = int(os.environ.get("SYNCED_MAX_PEERS", 8))    # Max peers per room
-HEARTBEAT_INTERVAL = int(os.environ.get("SYNCED_HEARTBEAT_INTERVAL", 30))   # seconds between pings
-HEARTBEAT_TIMEOUT = int(os.environ.get("SYNCED_HEARTBEAT_TIMEOUT", 300))   # close if no pong within this many seconds
+MAX_AVATAR_SIZE = 15000   # ~15KB base64 ≈ ~11KB image (thumbnail)
+MAX_ROOMS = _env_int("SYNCED_MAX_ROOMS", 100)                      # Cap total rooms
+MAX_PEERS_PER_ROOM = _env_int("SYNCED_MAX_PEERS", 8)               # Max peers per room
+HEARTBEAT_INTERVAL = _env_int("SYNCED_HEARTBEAT_INTERVAL", 30)     # seconds between pings
+HEARTBEAT_TIMEOUT = _env_int("SYNCED_HEARTBEAT_TIMEOUT", 300)      # close if no pong within this many seconds
                           # (Chrome throttles background tabs to ~1 timer/min)
-IDLE_TIMEOUT = int(os.environ.get("SYNCED_IDLE_TIMEOUT", 1800))       # close if no signaling messages in 30 minutes
+IDLE_TIMEOUT = _env_int("SYNCED_IDLE_TIMEOUT", 1800)               # close if no signaling messages in 30 minutes
 WS_ACCEPT_TIMEOUT = 10    # H1: seconds to wait for WebSocket handshake
 ALLOWED_TYPES = {"offer", "answer", "ice-candidate", "ping", "pong", "screen-sharing", "set-meta"}
 
@@ -27,11 +41,11 @@ ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 32 chars, no ambiguou
 ROOM_CODE_LENGTH = 6
 
 # Rate limiting: token bucket per peer
-RATE_LIMIT = int(os.environ.get("SYNCED_RATE_LIMIT", 100))          # messages per second
-RATE_BURST = int(os.environ.get("SYNCED_RATE_BURST", 200))          # max burst size
+RATE_LIMIT = _env_int("SYNCED_RATE_LIMIT", 100)                    # messages per second
+RATE_BURST = _env_int("SYNCED_RATE_BURST", 200)                    # max burst size
 
 # Per-IP connection limiting
-MAX_CONNECTIONS_PER_IP = int(os.environ.get("SYNCED_MAX_CONNECTIONS_PER_IP", 10))  # increased for multi-peer
+MAX_CONNECTIONS_PER_IP = _env_int("SYNCED_MAX_CONNECTIONS_PER_IP", 10)  # increased for multi-peer
 
 
 class _TokenBucket:
@@ -287,7 +301,7 @@ class SignalingRoom:
                         if isinstance(name, str):
                             meta["name"] = name[:32]
                         avatar = msg.get("avatar", "")
-                        if isinstance(avatar, str) and len(avatar) <= 70000:
+                        if isinstance(avatar, str) and len(avatar) <= MAX_AVATAR_SIZE:
                             meta["avatar"] = avatar
                         # Store meta and collect broadcast targets in a single lock
                         broadcast_msg = json.dumps({"type": "peer-meta", "peerId": peer_id, "meta": meta})
@@ -297,8 +311,8 @@ class SignalingRoom:
                         for tid, tws in targets:
                             try:
                                 await tws.send_text(broadcast_msg)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("[%s] failed to send peer-meta to %s: %s", self.room_id, tid[:8], e)
                     elif msg_type == "pong":
                         # Update pong timestamp for heartbeat timeout detection
                         async with self._lock:
@@ -385,6 +399,11 @@ class RoomManager:
                     logger.info("Created room %s (max_peers=%d, %d total rooms)", code, room.max_peers, len(self._rooms))
                     return code, token
             raise RoomLimitError("Could not generate unique room code")
+
+    @property
+    def room_count(self) -> int:
+        """Current number of active rooms (not async-safe, for monitoring only)."""
+        return len(self._rooms)
 
     async def room_exists(self, room_id: str) -> tuple[bool, bool]:
         """Returns (exists, joinable). Joinable = exists and not full."""

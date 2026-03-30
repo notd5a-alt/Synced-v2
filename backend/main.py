@@ -96,8 +96,8 @@ async def lifespan(app: FastAPI):
     yield
     cleanup_task.cancel()
     try:
-        await cleanup_task
-    except asyncio.CancelledError:
+        await asyncio.wait_for(cleanup_task, timeout=5.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
         pass
 
 
@@ -158,6 +158,12 @@ async def _global_exception_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    """Liveness/readiness check for orchestration (Docker, load balancers)."""
+    return {"status": "ok", "rooms": manager.room_count}
+
+
 @app.get("/api/info")
 async def info():
     return {"ip": get_local_ip(), "port": server_port}
@@ -187,9 +193,6 @@ async def check_room(code: str):
     resp: dict = {"exists": exists, "joinable": joinable, "peer_count": peer_count, "max_peers": max_peers}
     if joinable and token:
         resp["token"] = token
-    if exists:
-        # Include participant info (names only — avatars omitted from REST to keep response small)
-        resp["participants"] = [{"peerId": p["peerId"], "name": p["name"]} for p in participants]
     return resp
 
 

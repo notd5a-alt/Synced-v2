@@ -144,7 +144,7 @@ export default function Chat({
       const blob = new Blob(recChunksRef.current, { type: recorder.mimeType });
       const duration = (Date.now() - recStartRef.current) / 1000;
       if (duration > 0.5 && blob.size > 0) {
-        onSendVoice(blob, duration);
+        onSendVoice(blob, duration).catch((err) => console.error("Voice send failed:", err));
       }
       recChunksRef.current = [];
       if (recTimerRef.current) clearInterval(recTimerRef.current);

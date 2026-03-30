@@ -14,6 +14,7 @@ import Lobby from "./components/Lobby";
 import Chat from "./components/Chat";
 import VideoCall from "./components/VideoCall";
 import FileShare from "./components/FileShare";
+import ErrorBoundary from "./components/ErrorBoundary";
 import ThemeSelector from "./components/ThemeSelector";
 import { playPeerConnected, playPeerDisconnected, warmUpAudio, preloadRingtone, startRingtone, stopRingtone } from "./utils/sounds";
 import { getApiBaseUrl, getWsBaseUrl } from "./config";
@@ -647,6 +648,7 @@ export default function App() {
       <main className="session-content">
         {activeTab === "chat" && (
           <div className="tab-content" key="chat">
+          <ErrorBoundary fallback="tab">
           <Chat
             messages={chat.messages}
             onSend={chat.sendMessage}
@@ -664,10 +666,12 @@ export default function App() {
             onSendVoice={chat.sendVoice}
             localStream={webrtc.localStream}
           />
+          </ErrorBoundary>
           </div>
         )}
         {activeTab === "video" && (
           <div className="tab-content" key="video">
+          <ErrorBoundary fallback="tab">
           <VideoCall
             localStream={webrtc.localStream}
             screenStream={webrtc.screenStream}
@@ -739,10 +743,12 @@ export default function App() {
             localProfilePic={profilePic}
             peerAvatars={chat.peerAvatars}
           />
+          </ErrorBoundary>
           </div>
         )}
         {activeTab === "files" && (
           <div className="tab-content" key="files">
+          <ErrorBoundary fallback="tab">
           <FileShare
             incoming={files.incoming}
             outgoing={files.outgoing}
@@ -750,6 +756,7 @@ export default function App() {
             onSendFile={files.sendFile}
             onCancel={files.cancelTransfer}
           />
+          </ErrorBoundary>
           </div>
         )}
       </main>

@@ -59,6 +59,12 @@ export interface MultiChatHook {
 // M7: Max message length to prevent data channel buffer overflow
 const MAX_MESSAGE_LENGTH = 16000;
 
+// Max avatar data URL size (~15KB base64 ≈ ~11KB image, sufficient for thumbnails)
+const MAX_AVATAR_SIZE = 15000;
+
+// Whitelist of safe image MIME types for avatar data URLs (prevents SVG injection)
+const SAFE_AVATAR_RE = /^data:image\/(jpeg|png|gif|webp);base64,/;
+
 export default function useMultiChat(
   peers: Map<string, PeerInfo>,
   localDisplayName?: string,
@@ -258,8 +264,8 @@ export default function useMultiChat(
             });
           } else if (parsed.type === "profile-pic") {
             if (typeof parsed.data !== "string") return;
-            // Accept only small data URLs (max ~50KB base64)
-            if (parsed.data.length > 70000) return;
+            if (parsed.data.length > MAX_AVATAR_SIZE) return;
+            if (!SAFE_AVATAR_RE.test(parsed.data)) return; // reject SVG / non-image
             setPeerAvatars((prev) => {
               const next = new Map(prev);
               next.set(peerId, parsed.data);
@@ -275,7 +281,7 @@ export default function useMultiChat(
       if (localDisplayNameRef.current) {
         signAndSend(ch, hmacKey, { type: "display-name", name: localDisplayNameRef.current.slice(0, 32) }).catch(() => {});
       }
-      if (localProfilePicRef.current && localProfilePicRef.current.length <= 70000) {
+      if (localProfilePicRef.current && localProfilePicRef.current.length <= MAX_AVATAR_SIZE) {
         signAndSend(ch, hmacKey, { type: "profile-pic", data: localProfilePicRef.current }).catch(() => {});
       }
 

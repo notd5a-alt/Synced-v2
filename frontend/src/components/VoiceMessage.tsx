@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import AudioVisualizer from "./AudioVisualizer";
 import { formatDuration } from "../utils/formatTime";
+import { getSharedAudioContext, resumeSharedAudioContext } from "../utils/audioContext";
 
 interface VoiceMessageProps {
   blobUrl: string;
@@ -11,24 +12,25 @@ interface VoiceMessageProps {
 /**
  * Inline voice message with play/pause, progress, duration,
  * and an always-visible Three.js AudioVisualizer.
+ *
+ * Uses a shared AudioContext singleton to avoid hitting the browser
+ * limit (~6-8 contexts) when many voice messages are in chat history.
  */
 export default function VoiceMessage({ blobUrl, duration, userColor }: VoiceMessageProps) {
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const destRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const animRef = useRef<number>(0);
   const startTimeRef = useRef(0);
   const bufferRef = useRef<AudioBuffer | null>(null);
 
-  // Create a silent MediaStream on mount so the visualizer is always visible.
-  // When playback starts, the real audio routes through the same destination.
+  // Create a MediaStreamDestinationNode on mount so the visualizer is always visible.
+  // Uses the shared AudioContext — no per-instance context creation.
   useEffect(() => {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    audioCtxRef.current = ctx;
+    const ctx = getSharedAudioContext();
     const dest = ctx.createMediaStreamDestination();
     destRef.current = dest;
     setStream(dest.stream);
@@ -36,7 +38,7 @@ export default function VoiceMessage({ blobUrl, duration, userColor }: VoiceMess
     return () => {
       cancelAnimationFrame(animRef.current);
       try { sourceRef.current?.stop(); } catch { /* ok */ }
-      ctx.close().catch(() => {});
+      // Don't close the shared AudioContext — other instances may be using it
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -55,9 +57,8 @@ export default function VoiceMessage({ blobUrl, duration, userColor }: VoiceMess
   const play = useCallback(async () => {
     if (playing) { stop(); return; }
 
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-    if (ctx.state === "suspended") await ctx.resume();
+    const ctx = getSharedAudioContext();
+    await resumeSharedAudioContext();
 
     // Decode audio buffer if not cached
     if (!bufferRef.current) {

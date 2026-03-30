@@ -2,6 +2,8 @@ import { Component, type ReactNode, type ErrorInfo } from "react";
 
 interface Props {
   children: ReactNode;
+  /** Optional custom fallback UI. If omitted, uses the full-screen crash page. */
+  fallback?: "tab" | "full";
 }
 
 interface State {
@@ -25,6 +27,50 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      // Compact inline fallback for individual tabs
+      if (this.props.fallback === "tab") {
+        return (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              height: "100%",
+              color: "var(--text-dim, rgba(255,255,255,0.5))",
+              fontFamily: "var(--font-mono, monospace)",
+              gap: "12px",
+              padding: "24px",
+              textAlign: "center",
+            }}
+          >
+            <p style={{ fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              Something went wrong
+            </p>
+            <p style={{ fontSize: "0.7rem", opacity: 0.6 }}>
+              {this.state.error?.message || "An unexpected error occurred."}
+            </p>
+            <button
+              onClick={() => this.setState({ hasError: false, error: null })}
+              style={{
+                padding: "6px 16px",
+                border: "1px solid var(--outline, rgba(255,255,255,0.2))",
+                background: "transparent",
+                color: "var(--text, #fff)",
+                cursor: "pointer",
+                fontFamily: "var(--font-mono, monospace)",
+                fontSize: "0.75rem",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              [ RETRY ]
+            </button>
+          </div>
+        );
+      }
+
+      // Full-screen crash page (default, used for the top-level boundary)
       return (
         <div
           style={{
