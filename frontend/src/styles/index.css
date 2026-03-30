@@ -151,8 +151,8 @@ input[type="text"]:focus:placeholder-shown {
   padding: 24px;
 }
 .home-logo {
-  width: 96px;
-  height: 96px;
+  width: 160px;
+  height: 160px;
   image-rendering: pixelated;
 }
 .home h1 {
